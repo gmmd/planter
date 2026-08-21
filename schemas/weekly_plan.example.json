@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "week_start": "2026-08-24",
+  "timezone": "Europe/Moscow",
+  "watering": [
+    {
+      "id": "lemon-2026-08-24-1800",
+      "plant_id": "lemon",
+      "pump_id": "pump_lemon",
+      "start_at": "2026-08-24T18:00:00+03:00",
+      "duration_seconds": 5
+    },
+    {
+      "id": "pepper-2026-08-27-1800",
+      "plant_id": "pepper",
+      "pump_id": "pump_pepper",
+      "start_at": "2026-08-27T18:00:00+03:00",
+      "duration_seconds": 5
+    }
+  ],
+  "human_recommendations": "Поверните горшок на 90 градусов и удалите сухие листья."
+}

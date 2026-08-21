@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "report_generated_at": "2026-08-24T10:00:00+03:00",
+  "timezone": "Europe/Moscow",
+  "photo_selection": {
+    "strategy": "latest",
+    "limit": 21,
+    "selected_count": 2
+  },
+  "environment": {
+    "temperature_c": null,
+    "sensor_status": "not_connected"
+  },
+  "plants": [
+    {
+      "plant_id": "lemon",
+      "soil_moisture_percent": null,
+      "sensor_status": "not_connected"
+    },
+    {
+      "plant_id": "pepper",
+      "soil_moisture_percent": null,
+      "sensor_status": "not_connected"
+    }
+  ],
+  "media": {
+    "type": "image/jpeg",
+    "photo_count": 2,
+    "photos": [
+      {
+        "filename": "20260817_103000_000000.jpg",
+        "captured_at": "2026-08-17T10:30:00+03:00"
+      },
+      {
+        "filename": "20260817_123000_000000.jpg",
+        "captured_at": "2026-08-17T12:30:00+03:00"
+      }
+    ]
+  }
+}
