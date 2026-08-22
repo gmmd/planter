@@ -5,9 +5,9 @@
   "additionalProperties": false,
   "required": ["schema_version", "week_start", "timezone", "watering", "human_recommendations"],
   "properties": {
-    "schema_version": {"const": "1.0"},
-    "week_start": {"type": "string", "format": "date"},
-    "timezone": {"const": "Europe/Moscow"},
+    "schema_version": {"type": "string", "enum": ["1.0"]},
+    "week_start": {"type": "string", "minLength": 10, "maxLength": 10},
+    "timezone": {"type": "string", "enum": ["Europe/Moscow"]},
     "watering": {
       "type": "array",
       "maxItems": 21,
@@ -16,22 +16,12 @@
         "additionalProperties": false,
         "required": ["id", "plant_id", "pump_id", "start_at", "duration_seconds"],
         "properties": {
-          "id": {"type": "string", "pattern": "^[A-Za-z0-9_.-]{1,80}$"},
-          "plant_id": {"enum": ["lemon", "pepper"]},
-          "pump_id": {"enum": ["pump_lemon", "pump_pepper"]},
-          "start_at": {"type": "string", "format": "date-time"},
+          "id": {"type": "string", "minLength": 1, "maxLength": 80},
+          "plant_id": {"type": "string", "enum": ["lemon", "pepper"]},
+          "pump_id": {"type": "string", "enum": ["pump_lemon", "pump_pepper"]},
+          "start_at": {"type": "string", "minLength": 20, "maxLength": 40},
           "duration_seconds": {"type": "number", "minimum": 1, "maximum": 30}
-        },
-        "allOf": [
-          {
-            "if": {"properties": {"plant_id": {"const": "lemon"}}},
-            "then": {"properties": {"pump_id": {"const": "pump_lemon"}}}
-          },
-          {
-            "if": {"properties": {"plant_id": {"const": "pepper"}}},
-            "then": {"properties": {"pump_id": {"const": "pump_pepper"}}}
-          }
-        ]
+        }
       }
     },
     "human_recommendations": {"type": "string", "maxLength": 4000}

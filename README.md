@@ -126,6 +126,11 @@ The model response is parsed as JSON and then checked against the bot's pump,
 time-window, duration, event-count, and plant-to-pump safety rules before any
 watering jobs are created.
 
+The response schema deliberately contains no conditional `if`/`then` rules.
+Plant-to-pump matching (`lemon` → `pump_lemon`, `pepper` → `pump_pepper`) is
+stated in the AI instruction and enforced independently by `automation.py`
+after JSON parsing.
+
 For an offline test without making an API request, point `AI_RESPONSE_FILE` at
 a response JSON file. This setting takes precedence over the API:
 
