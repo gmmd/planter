@@ -128,6 +128,20 @@ The model response is parsed as JSON and then checked against the bot's pump,
 time-window, duration, event-count, and plant-to-pump safety rules before any
 watering jobs are created.
 
+Every real AI API call is archived under
+`data/ai_logs/YYYY-MM-DD/<timestamp>/`. Each directory contains:
+
+- `request.json` — dated request parameters, report, schema, tools, and photo
+  metadata (without the API key or duplicate base64 image data);
+- `response.txt` — the complete unmodified text returned by AI;
+- `response.json` — the complete SDK response, including metadata and usage when
+  supplied by the provider;
+- `status.json` — timestamps, duration, and the final request status;
+- `parsed_plan.json` for a valid JSON response, or `error.json` if the API call
+  failed.
+
+The original JPEG files referenced by each request remain in `data/photos/`.
+
 If the model returns text instead of a JSON object, the bot sends the complete
 raw response to Telegram. In a private chat it first streams the text through
 Telegram message drafts and then sends normal permanent messages. If drafts are

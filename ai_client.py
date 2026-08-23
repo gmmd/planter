@@ -7,8 +7,12 @@ import base64
 import json
 import logging
 import os
+import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 import openai
 
@@ -16,6 +20,10 @@ import openai
 logger = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parent
 PLAN_SCHEMA_PATH = PROJECT_DIR / "schemas" / "weekly_plan.schema.json"
+DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_DIR / "data")))
+AI_LOGS_DIR = DATA_DIR / "ai_logs"
+BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
+TZ = ZoneInfo(BOT_TIMEZONE)
 
 
 class NonJsonAIResponse(ValueError):
@@ -49,6 +57,8 @@ async def request_weekly_plan(
 def _request_weekly_plan(
     api_key: str, report: Dict[str, Any], photo_paths: Sequence[Path]
 ) -> Dict[str, Any]:
+    started_at = datetime.now(TZ)
+    started_monotonic = time.monotonic()
     base_url = os.getenv(
         "YANDEX_AI_BASE_URL", "https://ai.api.cloud.yandex.net/v1"
     ).strip()
@@ -76,6 +86,40 @@ def _request_weekly_plan(
         "weekly_report": report,
         "required_response_schema": schema,
     }
+    tools = [
+        {
+            "type": "file_search",
+            "vector_store_ids": ["fvtjgb6img000tqpr457"],
+            "max_num_results": 5,
+        },
+        {
+            "type": "web_search",
+            "filters": {"allowed_domains": []},
+            "search_context_size": "medium",
+        },
+    ]
+    log_dir = _create_ai_log_dir(started_at)
+    _write_json(
+        log_dir / "request.json",
+        {
+            "request_started_at": started_at.isoformat(),
+            "timezone": BOT_TIMEZONE,
+            "provider": "Yandex AI Studio",
+            "base_url": base_url,
+            "project_id": project_id,
+            "prompt": {"id": prompt_id},
+            "image_detail": detail,
+            "timeout_seconds": timeout,
+            "input": prompt_input,
+            "photos": [_photo_log_entry(path) for path in photo_paths],
+            "tools": tools,
+        },
+    )
+    _write_status(
+        log_dir,
+        status="requesting",
+        request_started_at=started_at,
+    )
     content: list[Dict[str, Any]] = [
         {
             "type": "input_text",
@@ -98,25 +142,156 @@ def _request_weekly_plan(
         timeout=timeout,
         max_retries=2,
     )
-    logger.info("Sending weekly AI request with %s photos", len(photo_paths))
-    response = client.responses.create(
-        prompt={"id": prompt_id},
-        input=[{"role": "user", "content": content}],
-        tools=[
-            {
-                "type": "file_search",
-                "vector_store_ids": ["fvtjgb6img000tqpr457"],
-                "max_num_results": 5
-            },
-            {
-                "type": "web_search",
-                "filters": {"allowed_domains": []},
-                "search_context_size": "medium"
-            }
-	    ],
+    logger.info(
+        "Sending weekly AI request with %s photos; log: %s",
+        len(photo_paths),
+        log_dir,
     )
-    logger.info("Weekly AI response received: %s", getattr(response, "id", "unknown"))
-    return _parse_response_json(response.output_text)
+    try:
+        response = client.responses.create(
+            prompt={"id": prompt_id},
+            input=[{"role": "user", "content": content}],
+            tools=tools,
+        )
+    except Exception as exc:
+        failed_at = datetime.now(TZ)
+        duration = time.monotonic() - started_monotonic
+        _write_json(
+            log_dir / "error.json",
+            {
+                "failed_at": failed_at.isoformat(),
+                "duration_seconds": round(duration, 3),
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            },
+        )
+        _write_status(
+            log_dir,
+            status="api_error",
+            request_started_at=started_at,
+            finished_at=failed_at,
+            duration_seconds=duration,
+        )
+        logger.exception("Weekly AI request failed; log: %s", log_dir)
+        raise
+
+    received_at = datetime.now(TZ)
+    duration = time.monotonic() - started_monotonic
+    raw_text = getattr(response, "output_text", "") or ""
+    _write_text(log_dir / "response.txt", raw_text)
+    _write_json(
+        log_dir / "response.json",
+        {
+            "response_received_at": received_at.isoformat(),
+            "duration_seconds": round(duration, 3),
+            "response_id": getattr(response, "id", None),
+            "output_text": raw_text,
+            "response": _serialize_ai_response(response),
+        },
+    )
+    logger.info(
+        "Weekly AI response received: %s; log: %s",
+        getattr(response, "id", "unknown"),
+        log_dir,
+    )
+    try:
+        parsed = _parse_response_json(raw_text)
+    except NonJsonAIResponse:
+        _write_status(
+            log_dir,
+            status="non_json_response",
+            request_started_at=started_at,
+            finished_at=received_at,
+            duration_seconds=duration,
+        )
+        raise
+    _write_json(log_dir / "parsed_plan.json", parsed)
+    _write_status(
+        log_dir,
+        status="json_response",
+        request_started_at=started_at,
+        finished_at=received_at,
+        duration_seconds=duration,
+    )
+    return parsed
+
+
+def _create_ai_log_dir(timestamp: datetime) -> Path:
+    directory = (
+        AI_LOGS_DIR
+        / f"{timestamp:%Y-%m-%d}"
+        / f"{timestamp:%Y%m%d_%H%M%S_%f}_{uuid.uuid4().hex[:8]}"
+    )
+    directory.mkdir(parents=True, exist_ok=False)
+    return directory
+
+
+def _photo_log_entry(path: Path) -> Dict[str, Any]:
+    stat = path.stat()
+    try:
+        logged_path = str(path.resolve().relative_to(PROJECT_DIR.resolve()))
+    except ValueError:
+        logged_path = str(path.resolve())
+    return {
+        "filename": path.name,
+        "path": logged_path,
+        "size_bytes": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, TZ).isoformat(),
+    }
+
+
+def _serialize_ai_response(response: Any) -> Any:
+    model_dump = getattr(response, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return model_dump(mode="json")
+        except Exception:
+            try:
+                return model_dump()
+            except Exception:
+                logger.warning("Could not serialize AI response with model_dump")
+    to_dict = getattr(response, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return to_dict()
+        except Exception:
+            logger.warning("Could not serialize AI response with to_dict")
+    return {"representation": repr(response)}
+
+
+def _write_status(
+    log_dir: Path,
+    status: str,
+    request_started_at: datetime,
+    finished_at: Optional[datetime] = None,
+    duration_seconds: Optional[float] = None,
+) -> None:
+    value: Dict[str, Any] = {
+        "status": status,
+        "request_started_at": request_started_at.isoformat(),
+        "updated_at": datetime.now(TZ).isoformat(),
+    }
+    if finished_at is not None:
+        value["finished_at"] = finished_at.isoformat()
+    if duration_seconds is not None:
+        value["duration_seconds"] = round(duration_seconds, 3)
+    _write_json(log_dir / "status.json", value)
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(value, file, ensure_ascii=False, indent=2, default=str)
+        file.write("\n")
+    temporary.replace(path)
+
+
+def _write_text(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(value, encoding="utf-8")
+    temporary.replace(path)
 
 
 def _jpeg_data_url(path: Path) -> str:
