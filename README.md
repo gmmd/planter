@@ -54,7 +54,7 @@ sudo systemctl restart telegram-camera-bot
 Then open the bot in Telegram. The bot registers `/start`, `/help`,
 `/take_photo`, `/water_lemon`, `/water_pepper`, `/weekly_report`, and
 `/schedule` in Telegram's Menu button on every startup. `/schedule` immediately
-sends the latest 21 photos (or every available photo when fewer exist) and the
+sends the latest 16 photos (or every available photo when fewer exist) and the
 current sensor values to AI, installs the validated watering plan, and replies
 to the requesting chat with the full schedule and human recommendations. It
 always calls the API, even when the offline `AI_RESPONSE_FILE` test setting is
@@ -68,8 +68,8 @@ The service uses `Europe/Moscow` by default and runs these jobs:
 - saves every scheduled and manual photo directly in `data/photos/`;
 - adds date, time, air temperature, lemon soil moisture, and pepper soil
   moisture as a watermark;
-- every Monday at 10:00 selects the latest 21 JPEG files, or all available files
-  when fewer than 21 exist;
+- every Monday at 10:00 selects the latest 16 JPEG files, or all available files
+  when fewer than 16 exist;
 - passes the weekly JSON report and all JPEG paths to `request_weekly_plan()` in
   `ai_client.py`;
 - validates and persists the returned watering plan;
@@ -88,7 +88,7 @@ DAILY_PHOTO_TIMES=10:30,12:30,15:00
 REPORT_CHAT_IDS=123456789
 MAX_WATERING_SECONDS=30
 MAX_WATERING_EVENTS=21
-AI_PHOTO_LIMIT=21
+AI_PHOTO_LIMIT=16
 TELEGRAM_STREAM_STEP_CHARS=400
 TELEGRAM_STREAM_INTERVAL_SECONDS=0.3
 ```
@@ -110,7 +110,7 @@ archived photo.
 
 `ai_client.py` uses the OpenAI Python SDK with Yandex AI Studio's compatible
 Responses endpoint. One request contains the weekly report, response JSON
-Schema, and up to 21 latest JPEG files as base64 image inputs.
+Schema, and up to 16 latest JPEG files as base64 image inputs.
 The reusable prompt, project, endpoint, timeout, and image detail are configured
 in `.env`:
 
@@ -119,14 +119,39 @@ YANDEX_AI_API_KEY=replace_with_your_real_key
 YANDEX_AI_BASE_URL=https://ai.api.cloud.yandex.net/v1
 YANDEX_AI_PROJECT_ID=b1gr38liecpk6mp2g7ul
 YANDEX_AI_PROMPT_ID=fvthisds2b24do0qnn7q
-YANDEX_AI_IMAGE_DETAIL=auto
+YANDEX_AI_IMAGE_DETAIL=low
+YANDEX_AI_IMAGE_MAX_WIDTH=1280
+YANDEX_AI_IMAGE_MAX_HEIGHT=720
+YANDEX_AI_IMAGE_JPEG_QUALITY=75
+YANDEX_AI_MAX_OUTPUT_TOKENS=4000
 YANDEX_AI_TIMEOUT_SECONDS=300
+YANDEX_AI_REQUEST_RETRIES=1
+YANDEX_AI_ENABLE_FILE_SEARCH=false
+YANDEX_AI_ENABLE_WEB_SEARCH=false
 ```
 
 Keep `.env` private; it is excluded from Git and the installer sets mode `600`.
 The model response is parsed as JSON and then checked against the bot's pump,
 time-window, duration, event-count, and plant-to-pump safety rules before any
 watering jobs are created.
+
+All selected photos are still sent, up to `AI_PHOTO_LIMIT=16`. The code applies
+a hard maximum of 16 even if an older `.env` contains a larger value. Before upload,
+temporary API copies are resized to fit within 1280×720 and saved as quality-75
+JPEGs. The dated originals and their watermarks are not modified. Native
+Responses API JSON Schema output is used instead of repeating the full schema
+inside the text prompt, and the response is limited to 4000 tokens.
+
+File search and web search are disabled by default because weekly plant-image
+analysis does not require them. They can be enabled independently with
+`YANDEX_AI_ENABLE_FILE_SEARCH=true` or
+`YANDEX_AI_ENABLE_WEB_SEARCH=true`. File search uses
+`YANDEX_AI_VECTOR_STORE_ID`.
+
+The bot treats a returned `status: failed` as a provider error instead of an
+empty non-JSON answer. Transient errors such as `model_call_error`, HTTP 5xx,
+timeouts, and rate limits are retried according to
+`YANDEX_AI_REQUEST_RETRIES`; every physical attempt has a separate dated log.
 
 Every real AI API call is archived under
 `data/ai_logs/YYYY-MM-DD/<timestamp>/`. Each directory contains:
@@ -136,7 +161,8 @@ Every real AI API call is archived under
 - `response.txt` — the complete unmodified text returned by AI;
 - `response.json` — the complete SDK response, including metadata and usage when
   supplied by the provider;
-- `status.json` — timestamps, duration, and the final request status;
+- `status.json` — timestamps, duration, and the final request status (including
+  `provider_error` when the API returns `status: failed`);
 - `parsed_plan.json` for a valid JSON response, or `error.json` if the API call
   failed.
 

@@ -4,7 +4,7 @@
   "timezone": "Europe/Moscow",
   "photo_selection": {
     "strategy": "latest",
-    "limit": 21,
+    "limit": 16,
     "selected_count": 2
   },
   "environment": {
