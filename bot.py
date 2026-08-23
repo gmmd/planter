@@ -36,9 +36,7 @@ pump_lock = asyncio.Lock()
 automation_controller: Optional[PlantAutomation] = None
 LEMON_PUMP_GPIO = int(os.getenv("LEMON_PUMP_GPIO", os.getenv("PUMP_GPIO", "17")))
 PEPPER_PUMP_GPIO_TEXT = os.getenv("PEPPER_PUMP_GPIO", "").strip()
-LEMON_WATERING_SECONDS = float(
-    os.getenv("LEMON_WATERING_SECONDS", os.getenv("WATERING_SECONDS", "5"))
-)
+LEMON_WATERING_SECONDS = float(os.getenv("LEMON_WATERING_SECONDS", "10"))
 PEPPER_WATERING_SECONDS = float(os.getenv("PEPPER_WATERING_SECONDS", "5"))
 VIDEO_WIDTH = int(os.getenv("VIDEO_WIDTH", "640"))
 VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "480"))
@@ -49,7 +47,7 @@ VIDEO_LEAD_OUT_SECONDS = float(os.getenv("VIDEO_LEAD_OUT_SECONDS", "0.5"))
 # active_high=False means on() drives GPIO LOW and off() drives it HIGH.
 pumps = {
     "pump_lemon": OutputDevice(
-        LEMON_PUMP_GPIO, active_high=False, initial_value=False
+        LEMON_PUMP_GPIO, active_high=True, initial_value=False
     )
 }
 if PEPPER_PUMP_GPIO_TEXT:
