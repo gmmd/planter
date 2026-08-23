@@ -126,8 +126,6 @@ YANDEX_AI_IMAGE_JPEG_QUALITY=75
 YANDEX_AI_MAX_OUTPUT_TOKENS=4000
 YANDEX_AI_TIMEOUT_SECONDS=300
 YANDEX_AI_REQUEST_RETRIES=1
-YANDEX_AI_ENABLE_FILE_SEARCH=false
-YANDEX_AI_ENABLE_WEB_SEARCH=false
 ```
 
 Keep `.env` private; it is excluded from Git and the installer sets mode `600`.
@@ -142,11 +140,8 @@ JPEGs. The dated originals and their watermarks are not modified. Native
 Responses API JSON Schema output is used instead of repeating the full schema
 inside the text prompt, and the response is limited to 4000 tokens.
 
-File search and web search are disabled by default because weekly plant-image
-analysis does not require them. They can be enabled independently with
-`YANDEX_AI_ENABLE_FILE_SEARCH=true` or
-`YANDEX_AI_ENABLE_WEB_SEARCH=true`. File search uses
-`YANDEX_AI_VECTOR_STORE_ID`.
+The request does not include `tools`: Yandex AI Studio cannot combine tools and
+the JSON Schema response format used by this bot.
 
 The bot treats a returned `status: failed` as a provider error instead of an
 empty non-JSON answer. Transient errors such as `model_call_error`, HTTP 5xx,
@@ -156,7 +151,7 @@ timeouts, and rate limits are retried according to
 Every real AI API call is archived under
 `data/ai_logs/YYYY-MM-DD/<timestamp>/`. Each directory contains:
 
-- `request.json` — dated request parameters, report, schema, tools, and photo
+- `request.json` — dated request parameters, report, schema, and photo
   metadata (without the API key or duplicate base64 image data);
 - `response.txt` — the complete unmodified text returned by AI;
 - `response.json` — the complete SDK response, including metadata and usage when

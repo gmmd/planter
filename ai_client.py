@@ -135,7 +135,6 @@ def _request_weekly_plan(
         ),
         "weekly_report": report,
     }
-    tools = _build_optional_tools()
     prepared_images = [
         _prepare_image(path, image_max_width, image_max_height, image_quality)
         for path in photo_paths
@@ -162,7 +161,6 @@ def _request_weekly_plan(
             "input": prompt_input,
             "response_schema": schema,
             "photos": [image["log"] for image in prepared_images],
-            "tools": tools,
         },
     )
     _write_status(
@@ -203,7 +201,6 @@ def _request_weekly_plan(
         response = client.responses.create(
             prompt={"id": prompt_id},
             input=[{"role": "user", "content": content}],
-            tools=tools,
             max_output_tokens=max_output_tokens,
             text={
                 "format": {
@@ -375,42 +372,6 @@ def _prepare_image(
     }
 
 
-def _build_optional_tools() -> list[Dict[str, Any]]:
-    tools: list[Dict[str, Any]] = []
-    if _env_flag("YANDEX_AI_ENABLE_FILE_SEARCH"):
-        vector_store_id = os.getenv(
-            "YANDEX_AI_VECTOR_STORE_ID", "fvtjgb6img000tqpr457"
-        ).strip()
-        if not vector_store_id:
-            raise RuntimeError(
-                "YANDEX_AI_VECTOR_STORE_ID is required when file search is enabled"
-            )
-        tools.append(
-            {
-                "type": "file_search",
-                "vector_store_ids": [vector_store_id],
-                "max_num_results": 5,
-            }
-        )
-    if _env_flag("YANDEX_AI_ENABLE_WEB_SEARCH"):
-        tools.append(
-            {
-                "type": "web_search",
-                "search_context_size": "low",
-            }
-        )
-    return tools
-
-
-def _env_flag(name: str) -> bool:
-    value = os.getenv(name, "false").strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off", ""}:
-        return False
-    raise RuntimeError(f"{name} must be true or false")
-
-
 def _object_field(value: Any, name: str, default: Any) -> Any:
     if value is None:
         return default
@@ -428,7 +389,6 @@ def _is_retryable_ai_error(exc: Exception) -> bool:
             "model_call_error",
             "server_error",
             "rate_limit_exceeded",
-            "vector_store_timeout",
         }
     status_code = getattr(exc, "status_code", None)
     if isinstance(status_code, int) and (status_code == 429 or status_code >= 500):
