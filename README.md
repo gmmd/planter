@@ -89,6 +89,8 @@ REPORT_CHAT_IDS=123456789
 MAX_WATERING_SECONDS=30
 MAX_WATERING_EVENTS=21
 AI_PHOTO_LIMIT=21
+TELEGRAM_STREAM_STEP_CHARS=400
+TELEGRAM_STREAM_INTERVAL_SECONDS=0.3
 ```
 
 Daily images, request JSON, and the accepted watering plan are stored under
@@ -125,6 +127,14 @@ Keep `.env` private; it is excluded from Git and the installer sets mode `600`.
 The model response is parsed as JSON and then checked against the bot's pump,
 time-window, duration, event-count, and plant-to-pump safety rules before any
 watering jobs are created.
+
+If the model returns text instead of a JSON object, the bot sends the complete
+raw response to Telegram. In a private chat it first streams the text through
+Telegram message drafts and then sends normal permanent messages. If drafts are
+unavailable (for example, in a group), it automatically falls back to permanent
+messages. Responses longer than one Telegram message are split without dropping
+content. Streaming chunk size and delay can be tuned with
+`TELEGRAM_STREAM_STEP_CHARS` and `TELEGRAM_STREAM_INTERVAL_SECONDS`.
 
 The response schema deliberately contains no conditional `if`/`then` rules.
 Plant-to-pump matching (`lemon` → `pump_lemon`, `pepper` → `pump_pepper`) is

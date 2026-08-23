@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import tempfile
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -19,7 +20,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
-from ai_client import request_weekly_plan
+from ai_client import NonJsonAIResponse, request_weekly_plan
 from sensors import read_sensor_snapshot
 
 
@@ -34,6 +35,10 @@ TZ = ZoneInfo(BOT_TIMEZONE)
 MAX_WATERING_SECONDS = float(os.getenv("MAX_WATERING_SECONDS", "30"))
 MAX_WATERING_EVENTS = int(os.getenv("MAX_WATERING_EVENTS", "21"))
 AI_PHOTO_LIMIT = int(os.getenv("AI_PHOTO_LIMIT", "21"))
+TELEGRAM_STREAM_STEP_CHARS = int(os.getenv("TELEGRAM_STREAM_STEP_CHARS", "400"))
+TELEGRAM_STREAM_INTERVAL_SECONDS = float(
+    os.getenv("TELEGRAM_STREAM_INTERVAL_SECONDS", "0.3")
+)
 EVENT_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 
 CapturePhoto = Callable[[Path], None]
@@ -263,6 +268,24 @@ class PlantAutomation:
 
         try:
             plan = await request_weekly_plan(report, photos, force_api=force_ai)
+        except NonJsonAIResponse as exc:
+            targets = [reply_chat_id] if reply_chat_id is not None else self.chat_ids
+            delivered = 0
+            for chat_id in dict.fromkeys(targets):
+                try:
+                    await self._stream_ai_text(chat_id, exc.raw_text)
+                except Exception:
+                    logger.exception(
+                        "Could not send non-JSON AI response to chat %s", chat_id
+                    )
+                else:
+                    delivered += 1
+            if not targets:
+                logger.warning("AI returned non-JSON text, but no Telegram chat is set")
+                return "Нейросеть вернула текст вместо JSON, но чат для ответа не задан."
+            if not delivered:
+                return "Нейросеть вернула текст вместо JSON, но отправить его не удалось."
+            return "Нейросеть вернула текст вместо JSON; полный ответ отправлен в Telegram."
         except Exception as exc:
             logger.exception("Weekly AI request failed")
             if notify_configured_chats:
@@ -314,6 +337,45 @@ class PlantAutomation:
                 chunk = remaining[:split_at]
                 remaining = remaining[split_at:].lstrip("\n")
             await self.bot.send_message(chat_id, chunk)
+
+    async def _stream_ai_text(self, chat_id: int, text: str) -> None:
+        """Animate non-JSON AI text with sendMessageDraft, then persist it."""
+        if TELEGRAM_STREAM_STEP_CHARS < 1:
+            raise RuntimeError("TELEGRAM_STREAM_STEP_CHARS must be at least 1")
+        if TELEGRAM_STREAM_INTERVAL_SECONDS < 0:
+            raise RuntimeError("TELEGRAM_STREAM_INTERVAL_SECONDS cannot be negative")
+        response_text = text if text else "(Нейросеть вернула пустой ответ)"
+        remaining = response_text
+        draft_available = True
+        while remaining:
+            final_chunk = remaining[:4000]
+            remaining = remaining[4000:]
+            if draft_available:
+                draft_id = secrets.randbelow(2**63 - 1) + 1
+                for end in range(
+                    TELEGRAM_STREAM_STEP_CHARS,
+                    len(final_chunk) + TELEGRAM_STREAM_STEP_CHARS,
+                    TELEGRAM_STREAM_STEP_CHARS,
+                ):
+                    partial = final_chunk[: min(end, len(final_chunk))]
+                    try:
+                        await self.bot.send_message_draft(
+                            chat_id=chat_id,
+                            draft_id=draft_id,
+                            text=partial,
+                        )
+                    except Exception:
+                        logger.info(
+                            "sendMessageDraft is unavailable for chat %s; using fallback",
+                            chat_id,
+                            exc_info=True,
+                        )
+                        draft_available = False
+                        break
+                    if len(partial) < len(final_chunk) or remaining:
+                        await asyncio.sleep(TELEGRAM_STREAM_INTERVAL_SECONDS)
+            # Drafts are ephemeral; a normal message makes the answer permanent.
+            await self.bot.send_message(chat_id, final_chunk)
 
     @staticmethod
     def _format_plan(plan: Dict[str, Any]) -> str:

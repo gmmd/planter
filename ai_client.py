@@ -18,6 +18,14 @@ PROJECT_DIR = Path(__file__).resolve().parent
 PLAN_SCHEMA_PATH = PROJECT_DIR / "schemas" / "weekly_plan.schema.json"
 
 
+class NonJsonAIResponse(ValueError):
+    """Raised when AI returned text that cannot be accepted as a JSON plan."""
+
+    def __init__(self, raw_text: str) -> None:
+        super().__init__("AI response is not a JSON object")
+        self.raw_text = raw_text
+
+
 async def request_weekly_plan(
     report: Dict[str, Any],
     photo_paths: Sequence[Path],
@@ -117,7 +125,8 @@ def _jpeg_data_url(path: Path) -> str:
 
 
 def _parse_response_json(text: str) -> Dict[str, Any]:
-    value = text.strip()
+    raw_text = text or ""
+    value = raw_text.strip()
     if value.startswith("```"):
         lines = value.splitlines()
         if lines and lines[0].strip().lower() in {"```", "```json"}:
@@ -131,10 +140,13 @@ def _parse_response_json(text: str) -> Dict[str, Any]:
         start = value.find("{")
         end = value.rfind("}")
         if start < 0 or end <= start:
-            raise ValueError("AI response does not contain a JSON object")
-        parsed = json.loads(value[start : end + 1])
+            raise NonJsonAIResponse(raw_text)
+        try:
+            parsed = json.loads(value[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise NonJsonAIResponse(raw_text) from exc
     if not isinstance(parsed, dict):
-        raise ValueError("AI response must be a JSON object")
+        raise NonJsonAIResponse(raw_text)
     return parsed
 
 
