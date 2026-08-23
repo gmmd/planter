@@ -168,11 +168,13 @@ first installation or to recreate the systemd unit.
 relay. It is deliberately blank by default, so pepper watering remains disabled
 until the real pin is configured. The two GPIO numbers must be different.
 
-Both relay/control inputs are active-low: idle is HIGH and watering drives the
-selected output LOW. Do not power a pump directly from a GPIO pin. Use suitable
-relays or MOSFET drivers, a separate pump power supply, flyback protection for
-inductive DC loads, and a common ground where required by the drivers. Verify
-safe startup behavior before leaving the system unattended.
+The lemon relay is controlled by toggle pulses: one GPIO17 on/off pulse starts
+the pump and a second pulse stops it after the watering interval. The pepper
+relay remains active-low and is held active for the watering interval. Do not
+power a pump directly from a GPIO pin. Use suitable relays or MOSFET drivers, a
+separate pump power supply, flyback protection for inductive DC loads, and a
+common ground where required by the drivers. Verify safe startup behavior before
+leaving the system unattended.
 
 Configure both pumps and manual durations in `.env`, then restart the service:
 
@@ -181,9 +183,13 @@ LEMON_PUMP_GPIO=17
 PEPPER_PUMP_GPIO=27
 LEMON_WATERING_SECONDS=5
 PEPPER_WATERING_SECONDS=5
+LEMON_TOGGLE_PULSE_SECONDS=0.2
 ```
 
 Replace `27` with the actual BCM pin used by the pepper pump.
+
+`LEMON_TOGGLE_PULSE_SECONDS` controls how long the GPIO17 logical ON part of
+each toggle pulse lasts. The default is 200 ms.
 
 ```bash
 sudo systemctl restart telegram-camera-bot

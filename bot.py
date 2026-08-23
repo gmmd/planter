@@ -40,13 +40,16 @@ LEMON_WATERING_SECONDS = float(
     os.getenv("LEMON_WATERING_SECONDS", os.getenv("WATERING_SECONDS", "10"))
 )
 PEPPER_WATERING_SECONDS = float(os.getenv("PEPPER_WATERING_SECONDS", "10"))
+LEMON_TOGGLE_PULSE_SECONDS = float(
+    os.getenv("LEMON_TOGGLE_PULSE_SECONDS", "0.2")
+)
 VIDEO_WIDTH = int(os.getenv("VIDEO_WIDTH", "640"))
 VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "480"))
 VIDEO_FRAMERATE = float(os.getenv("VIDEO_FRAMERATE", "24"))
 VIDEO_BITRATE = int(os.getenv("VIDEO_BITRATE", "2000000"))
 VIDEO_LEAD_IN_SECONDS = float(os.getenv("VIDEO_LEAD_IN_SECONDS", "1"))
 VIDEO_LEAD_OUT_SECONDS = float(os.getenv("VIDEO_LEAD_OUT_SECONDS", "0.5"))
-# active_high=False means on() drives GPIO LOW and off() drives it HIGH.
+# Lemon uses a logical toggle pulse; pepper uses a conventional active-low relay.
 pumps = {
     "pump_lemon": OutputDevice(
         LEMON_PUMP_GPIO, active_high=True, initial_value=False
@@ -58,6 +61,8 @@ if PEPPER_PUMP_GPIO_TEXT:
     pumps["pump_pepper"] = OutputDevice(
         int(PEPPER_PUMP_GPIO_TEXT), active_high=False, initial_value=False
     )
+if not 0.02 <= LEMON_TOGGLE_PULSE_SECONDS <= 2:
+    raise RuntimeError("LEMON_TOGGLE_PULSE_SECONDS must be between 0.02 and 2")
 
 
 def _sleep_until(deadline: float) -> None:
@@ -71,6 +76,42 @@ def _sleep_until(deadline: float) -> None:
 def stop_all_pumps() -> None:
     for configured_pump in pumps.values():
         configured_pump.off()
+
+
+def _toggle_pulse(selected_pump: OutputDevice) -> None:
+    """Send one on/off pulse to a toggle-controlled relay input."""
+    selected_pump.off()
+    selected_pump.on()
+    try:
+        time.sleep(LEMON_TOGGLE_PULSE_SECONDS)
+    finally:
+        selected_pump.off()
+
+
+def _run_pump_cycle(
+    selected_pump: OutputDevice, pump_id: str, duration_seconds: float
+) -> None:
+    if pump_id == "pump_lemon":
+        # First pulse toggles the lemon pump on; the second toggles it off.
+        _toggle_pulse(selected_pump)
+        interval_started = time.monotonic()
+        try:
+            _sleep_until(interval_started + duration_seconds)
+        finally:
+            actual_interval = time.monotonic() - interval_started
+            _toggle_pulse(selected_pump)
+    else:
+        # Pepper uses a conventional active-low relay held on while watering.
+        interval_started = time.monotonic()
+        selected_pump.on()
+        try:
+            _sleep_until(interval_started + duration_seconds)
+        finally:
+            actual_interval = time.monotonic() - interval_started
+            selected_pump.off()
+    logger.info(
+        "Pump %s watering interval was %.3f seconds", pump_id, actual_interval
+    )
 
 
 def allowed_user_ids() -> set[int]:
@@ -109,7 +150,7 @@ def capture_photo(path: Path) -> None:
 def run_watering_with_video(
     path: Path, pump_id: str, duration_seconds: float
 ) -> None:
-    """Record video before, during, and after one active-low pump cycle."""
+    """Record video before, during, and after one configured pump cycle."""
     camera = Picamera2()
     recording = False
     try:
@@ -131,16 +172,7 @@ def run_watering_with_video(
         selected_pump = pumps.get(pump_id)
         if selected_pump is None:
             raise RuntimeError(f"Pump {pump_id} is not configured")
-        selected_pump.on()
-        pump_started = time.monotonic()
-        _sleep_until(pump_started + duration_seconds)
-
-        selected_pump.off()
-        logger.info(
-            "Pump %s ran for %.3f seconds",
-            pump_id,
-            time.monotonic() - pump_started,
-        )
+        _run_pump_cycle(selected_pump, pump_id, duration_seconds)
         time.sleep(VIDEO_LEAD_OUT_SECONDS)
     finally:
         # The pump must be turned off even if camera recording fails.
