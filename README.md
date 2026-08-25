@@ -1,6 +1,6 @@
 # Raspberry Pi Telegram Camera Bot
 
-An aiogram 3 bot that captures photos and controls two active-low plant pumps.
+An aiogram 3 bot that captures photos and controls two plant pumps.
 `/water_lemon` waters the lemon, `/water_pepper` waters the pepper, and each
 manual watering command records and returns a video.
 
@@ -73,7 +73,7 @@ The service uses `Europe/Moscow` by default and runs these jobs:
 - passes the weekly JSON report and all JPEG paths to `request_weekly_plan()` in
   `ai_client.py`;
 - validates and persists the returned watering plan;
-- runs accepted watering events on the matching active-low plant pump;
+- runs accepted watering events on the matching plant pump;
 - records every scheduled watering with the same camera workflow as the manual
   `/water_lemon` and `/water_pepper` commands;
 - sends scheduled-watering MP4 videos to `REPORT_CHAT_IDS` (falling back to
@@ -213,9 +213,10 @@ first installation or to recreate the systemd unit.
 relay. It is deliberately blank by default, so pepper watering remains disabled
 until the real pin is configured. The two GPIO numbers must be different.
 
-The lemon relay is controlled by toggle pulses: one GPIO17 on/off pulse starts
-the pump and a second pulse stops it after the watering interval. The pepper
-relay remains active-low and is held active for the watering interval. Do not
+The lemon relay is controlled by toggle pulses: one GPIO17 LOW/HIGH/LOW pulse
+starts the pump and a second pulse stops it after the watering interval. The
+pepper output is active-high: it remains LOW while idle and is held HIGH for
+the watering interval. Do not
 power a pump directly from a GPIO pin. Use suitable relays or MOSFET drivers, a
 separate pump power supply, flyback protection for inductive DC loads, and a
 common ground where required by the drivers. Verify safe startup behavior before

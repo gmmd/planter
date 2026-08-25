@@ -49,7 +49,8 @@ VIDEO_FRAMERATE = float(os.getenv("VIDEO_FRAMERATE", "24"))
 VIDEO_BITRATE = int(os.getenv("VIDEO_BITRATE", "2000000"))
 VIDEO_LEAD_IN_SECONDS = float(os.getenv("VIDEO_LEAD_IN_SECONDS", "1"))
 VIDEO_LEAD_OUT_SECONDS = float(os.getenv("VIDEO_LEAD_OUT_SECONDS", "0.5"))
-# Lemon uses a logical toggle pulse; pepper uses a conventional active-low relay.
+# Both GPIO outputs are active-high: LOW is idle and HIGH drives the pump input.
+# Lemon uses short toggle pulses; pepper stays HIGH for the watering interval.
 pumps = {
     "pump_lemon": OutputDevice(
         LEMON_PUMP_GPIO, active_high=True, initial_value=False
@@ -101,7 +102,7 @@ def _run_pump_cycle(
             actual_interval = time.monotonic() - interval_started
             _toggle_pulse(selected_pump)
     else:
-        # Pepper uses a conventional active-low relay held on while watering.
+        # Pepper stays physically HIGH while watering and returns LOW afterward.
         interval_started = time.monotonic()
         selected_pump.on()
         try:
