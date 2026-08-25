@@ -59,7 +59,7 @@ if PEPPER_PUMP_GPIO_TEXT:
     if int(PEPPER_PUMP_GPIO_TEXT) == LEMON_PUMP_GPIO:
         raise RuntimeError("LEMON_PUMP_GPIO and PEPPER_PUMP_GPIO must be different")
     pumps["pump_pepper"] = OutputDevice(
-        int(PEPPER_PUMP_GPIO_TEXT), active_high=False, initial_value=False
+        int(PEPPER_PUMP_GPIO_TEXT), active_high=True, initial_value=False
     )
 if not 0.02 <= LEMON_TOGGLE_PULSE_SECONDS <= 2:
     raise RuntimeError("LEMON_TOGGLE_PULSE_SECONDS must be between 0.02 and 2")
