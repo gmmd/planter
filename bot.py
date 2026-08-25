@@ -162,7 +162,11 @@ def run_watering_with_video(
             buffer_count=4,
         )
         camera.configure(config)
-        encoder = H264Encoder(bitrate=VIDEO_BITRATE)
+        encoder = H264Encoder(
+            bitrate=VIDEO_BITRATE,
+            framerate=VIDEO_FRAMERATE,
+            enable_sps_framerate=True,
+        )
         output = FfmpegOutput(str(path), audio=False)
         camera.start_recording(encoder, output)
         recording = True
