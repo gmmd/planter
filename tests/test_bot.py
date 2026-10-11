@@ -9,6 +9,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+import telegram_menu
+
 
 def load_bot():
     """Use real aiogram/APScheduler while replacing unavailable Pi drivers."""
@@ -45,8 +47,10 @@ class BotCommandsTests(unittest.IsolatedAsyncioTestCase):
         self.message.from_user.id = 123
         self.message.answer = AsyncMock()
         self.message.answer.return_value.edit_text = AsyncMock()
+        self.refresh_menu = AsyncMock(return_value=True)
         for patcher in (
             patch.object(bot, "automation_controller", self.controller),
+            patch.object(bot, "refresh_chat_commands", self.refresh_menu),
             patch.dict(os.environ, {"ALLOWED_USER_IDS": "123"}),
         ):
             patcher.start()
@@ -85,6 +89,7 @@ class BotCommandsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_help_lists_new_commands_and_removes_old_ones(self):
         await bot.help_command(self.message)
+        self.refresh_menu.assert_awaited_once_with(self.message)
         text = self.message.answer.await_args.args[0]
         self.assertIn("/get_schedule", text)
         self.assertIn("/read_schedule", text)
@@ -93,6 +98,28 @@ class BotCommandsTests(unittest.IsolatedAsyncioTestCase):
         handlers = {handler.callback.__name__ for handler in bot.router.message.handlers}
         self.assertTrue({"get_schedule", "read_schedule"} <= handlers)
         self.assertTrue({"weekly_report", "schedule"}.isdisjoint(handlers))
+
+    async def test_start_refreshes_menu_for_calling_chat(self):
+        await bot.start(self.message)
+        self.refresh_menu.assert_awaited_once_with(self.message)
+        self.message.answer.assert_awaited_once()
+
+    async def test_start_and_help_do_not_refresh_menu_for_unauthorized_user(self):
+        self.message.from_user.id = 999
+        for handler in (bot.start, bot.help_command):
+            with self.subTest(handler=handler.__name__):
+                self.message.answer.reset_mock()
+                await handler(self.message)
+                self.message.answer.assert_awaited_once_with("Access denied.")
+        self.refresh_menu.assert_not_awaited()
+
+    async def test_menu_failure_does_not_hide_help_or_claim_success(self):
+        self.refresh_menu.return_value = False
+        await bot.help_command(self.message)
+        replies = [call.args[0] for call in self.message.answer.await_args_list]
+        self.assertIn("/get_schedule", replies[0])
+        self.assertIn("Не удалось обновить Menu", replies[1])
+        self.controller.run_weekly_cycle.assert_not_awaited()
 
 
 class BotHardwareTests(unittest.TestCase):
@@ -180,7 +207,8 @@ class BotLifecycleTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cleanup_events = []
         self.telegram = SimpleNamespace(
-            set_my_commands=AsyncMock(),
+            set_my_commands=AsyncMock(return_value=True),
+            set_chat_menu_button=AsyncMock(return_value=True),
             session=SimpleNamespace(close=AsyncMock(
                 side_effect=lambda: self.cleanup_events.append("session")
             )),
@@ -240,7 +268,7 @@ class BotLifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_menu_error_does_not_stop_polling(self):
         self.telegram.set_my_commands.side_effect = RuntimeError("temporary network error")
-        with self.assertLogs(bot.logger, level="ERROR"):
+        with self.assertLogs(telegram_menu.logger, level="ERROR"):
             await bot.main()
         self.dispatcher.start_polling.assert_awaited_once()
         self.assertEqual(self.cleanup_events, ["workers", "gpio", "session"])

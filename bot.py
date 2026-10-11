@@ -15,7 +15,7 @@ from typing import Optional
 
 from aiogram import Bot, Dispatcher, Router
 from aiogram.filters import Command, CommandStart
-from aiogram.types import BotCommand, FSInputFile, Message
+from aiogram.types import FSInputFile, Message
 from gpiozero import OutputDevice
 from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
@@ -25,6 +25,7 @@ from automation import PICK_DAILY_PHOTO_TIME, PlantAutomation, TZ, new_photo_pat
 from hardware_tasks import hardware_tasks
 from photo_watermark import add_photo_watermark
 from sensors import read_sensor_snapshot
+from telegram_menu import refresh_chat_commands, register_commands
 
 
 logging.basicConfig(
@@ -231,10 +232,16 @@ async def start(message: Message) -> None:
     if not is_allowed(message):
         await message.answer("Access denied.")
         return
+    menu_updated = await refresh_chat_commands(message)
     await message.answer(
         "Бот управления растением готов. Команды доступны через кнопку Menu. "
         "Для подробностей используйте /help."
     )
+    if not menu_updated:
+        await message.answer(
+            "Не удалось обновить Menu в Telegram. Команды можно вводить вручную; "
+            "повторите /help позже. Подробности в журнале службы."
+        )
 
 
 @router.message(Command("help"))
@@ -242,6 +249,7 @@ async def help_command(message: Message) -> None:
     if not is_allowed(message):
         await message.answer("Access denied.")
         return
+    menu_updated = await refresh_chat_commands(message)
     await message.answer(
         "Доступные команды:\n\n"
         "/take_photo — сделать фотографию, добавить показания датчиков и "
@@ -261,6 +269,11 @@ async def help_command(message: Message) -> None:
         "в 10:00 запрашивает недельный план и выполняет разрешённые поливы. "
         "Каждый плановый полив записывается на видео и отправляется в Telegram."
     )
+    if not menu_updated:
+        await message.answer(
+            "Не удалось обновить Menu в Telegram. Команды из справки доступны "
+            "вручную; повторите /help позже. Подробности в журнале службы."
+        )
 
 
 @router.message(Command("take_photo"))
@@ -375,31 +388,6 @@ async def get_schedule(message: Message) -> None:
         force_ai=True,
     )
     await status.edit_text(result if len(result) <= 4000 else result[:3999] + "…")
-
-
-async def register_commands(bot: Bot) -> None:
-    try:
-        await bot.set_my_commands(
-            [
-                BotCommand(command="start", description="Запустить бота"),
-                BotCommand(command="help", description="Справка по командам"),
-                BotCommand(command="take_photo", description="Сделать фотографию"),
-                BotCommand(
-                    command="water_lemon", description="Полить лимон и снять видео"
-                ),
-                BotCommand(
-                    command="water_pepper", description="Полить перец и снять видео"
-                ),
-                BotCommand(
-                    command="get_schedule", description="Получить новый план от AI"
-                ),
-                BotCommand(
-                    command="read_schedule", description="Посмотреть сохранённый план"
-                ),
-            ]
-        )
-    except Exception:
-        logger.exception("Could not register Telegram command menu")
 
 
 async def main() -> None:

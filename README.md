@@ -68,6 +68,23 @@ it does not call AI, take photos, save files or change watering jobs. It also
 shows plans from previous weeks, with elapsed events marked as past. The former
 `/weekly_report` and `/schedule` commands have been removed.
 
+Telegram stores command menus separately by language and chat scope. At startup,
+the bot updates the default, private-chat, group-chat and administrator menus for
+the default language, Russian and English. `/start` and `/help` also refresh the
+calling chat/user's menu for their Telegram language, overriding stale menus
+from earlier versions without changing the watering schedule. The Menu button
+is explicitly set to show commands in private chats. See Telegram's
+[command selection rules](https://core.telegram.org/bots/api#determining-list-of-commands).
+
+If old commands remain after updating and restarting the service, send `/help`
+once and close/reopen the command list. If Telegram rejects the update, the bot
+still sends the help text and a warning. Each successful scope/language update
+and each failure is recorded in the service journal:
+
+```bash
+sudo journalctl -u telegram-camera-bot -n 100 --no-pager
+```
+
 ## Weekly automation
 
 The service uses `Europe/Moscow` by default and runs these jobs:
