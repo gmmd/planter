@@ -30,6 +30,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_DIR / "data")))
 PHOTOS_DIR = DATA_DIR / "photos"
 REPORTS_DIR = DATA_DIR / "reports"
 PLAN_FILE = DATA_DIR / "watering_plan.json"
+PICK_DAILY_PHOTO_TIME = os.getenv("PICK_DAILY_PHOTO_TIME", "15:00")
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
 TZ = ZoneInfo(BOT_TIMEZONE)
 MAX_WATERING_SECONDS = float(os.getenv("MAX_WATERING_SECONDS", "30"))
@@ -100,7 +101,7 @@ def _photo_captured_at(path: Path) -> Optional[datetime]:
 
 
 def _weekly_photo_paths(now: Optional[datetime] = None) -> List[Path]:
-    """Select one 12:00 photo per day within the preceding seven days."""
+    """Select one {PICK_DAILY_PHOTO_TIME} photo per day within the preceding seven days."""
     current = (now or datetime.now(TZ)).astimezone(TZ)
     window_start = current - timedelta(days=WEEKLY_PHOTO_DAYS)
     by_day: Dict[date, tuple[datetime, Path]] = {}
@@ -248,7 +249,7 @@ class PlantAutomation:
         now = datetime.now(TZ)
         photos = _weekly_photo_paths(now)
         if not photos:
-            message = "Нет фотографий, сделанных в 12:00 за последние 7 дней."
+            message = "Нет фотографий, сделанных в {PICK_DAILY_PHOTO_TIME} за последние 7 дней."
             if notify_configured_chats:
                 await self._notify(message)
             return message
@@ -261,7 +262,7 @@ class PlantAutomation:
             "photo_selection": {
                 "strategy": "daily_noon_last_7_days",
                 "limit": WEEKLY_PHOTO_DAYS,
-                "capture_time": "12:00",
+                "capture_time": PICK_DAILY_PHOTO_TIME,
                 "window_start": (now - timedelta(days=WEEKLY_PHOTO_DAYS)).isoformat(),
                 "window_end": now.isoformat(),
                 "selected_count": len(photos),

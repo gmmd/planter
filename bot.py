@@ -43,6 +43,7 @@ PEPPER_WATERING_SECONDS = float(os.getenv("PEPPER_WATERING_SECONDS", "10"))
 LEMON_TOGGLE_PULSE_SECONDS = float(
     os.getenv("LEMON_TOGGLE_PULSE_SECONDS", "0.2")
 )
+PICK_DAILY_PHOTO_TIME = os.getenv("PICK_DAILY_PHOTO_TIME", "15:00")
 VIDEO_WIDTH = int(os.getenv("VIDEO_WIDTH", "640"))
 VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "480"))
 VIDEO_FRAMERATE = float(os.getenv("VIDEO_FRAMERATE", "24"))
@@ -218,7 +219,7 @@ async def help_command(message: Message) -> None:
         "/help — показать эту справку.\n\n"
         "По умолчанию бот делает фотографии каждый час с 08:00 до 20:00 включительно "
         "(расписание задаётся в DAILY_PHOTO_TIMES). Для отчёта берёт до 7 снимков "
-        "за последние 7 дней: по одному в 12:00 за день. Каждый понедельник "
+        "за последние 7 дней: по одному в {PICK_DAILY_PHOTO_TIME} за день. Каждый понедельник "
         "в 10:00 запрашивает недельный план и выполняет разрешённые поливы. "
         "Каждый плановый полив записывается на видео и отправляется в Telegram."
     )
