@@ -7,6 +7,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -85,7 +86,7 @@ async def request_weekly_plan(
                 delay,
                 attempt + 1,
                 retries + 1,
-                exc,
+                _redact_error_value(str(exc), api_key),
             )
             await asyncio.sleep(delay)
     raise RuntimeError("AI retry loop ended unexpectedly")
@@ -99,6 +100,47 @@ def _request_weekly_plan(
 ) -> Dict[str, Any]:
     started_at = datetime.now(TZ)
     started_monotonic = time.monotonic()
+    log_dir = _create_ai_log_dir(started_at)
+    # Keep a record even when configuration, a missing photo or client creation
+    # fails before the HTTP request can be sent.
+    _write_json(
+        log_dir / "request.json",
+        {
+            "request_started_at": started_at.isoformat(),
+            "attempt_number": attempt_number,
+            "timezone": BOT_TIMEZONE,
+            "provider": "Yandex AI Studio",
+            "weekly_report": report,
+            "photo_paths": [str(path) for path in photo_paths],
+        },
+    )
+    _write_status(log_dir, "preparing", started_at)
+    try:
+        return _request_weekly_plan_attempt(
+            api_key, report, photo_paths, attempt_number,
+            log_dir, started_at, started_monotonic,
+        )
+    except (NonJsonAIResponse, AIProviderResponseError):
+        # These responses already have their complete body and final status.
+        raise
+    except Exception as exc:
+        if not (log_dir / "error.json").exists():
+            _log_request_error(
+                log_dir, exc, api_key, started_at, started_monotonic,
+                status="preparation_error",
+            )
+        raise
+
+
+def _request_weekly_plan_attempt(
+    api_key: str,
+    report: Dict[str, Any],
+    photo_paths: Sequence[Path],
+    attempt_number: int,
+    log_dir: Path,
+    started_at: datetime,
+    started_monotonic: float,
+) -> Dict[str, Any]:
     base_url = os.getenv(
         "YANDEX_AI_BASE_URL", "https://ai.api.cloud.yandex.net/v1"
     ).strip()
@@ -114,6 +156,8 @@ def _request_weekly_plan(
         raise RuntimeError("YANDEX_AI_PROJECT_ID and YANDEX_AI_PROMPT_ID are required")
     if detail not in {"low", "high", "auto"}:
         raise RuntimeError("YANDEX_AI_IMAGE_DETAIL must be low, high, or auto")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RuntimeError("YANDEX_AI_TIMEOUT_SECONDS must be a positive finite number")
     if image_max_width < 320 or image_max_height < 240:
         raise RuntimeError("YANDEX_AI image dimensions are too small")
     if not 40 <= image_quality <= 95:
@@ -121,7 +165,7 @@ def _request_weekly_plan(
     if not 256 <= max_output_tokens <= 81920:
         raise RuntimeError("YANDEX_AI_MAX_OUTPUT_TOKENS must be between 256 and 81920")
 
-    schema = _read_json(PLAN_SCHEMA_PATH)
+    schema = _load_plan_schema()
     prompt_input = {
         "task": (
             "Проанализируй недельные фотографии, температуру воздуха и влажность "
@@ -139,7 +183,6 @@ def _request_weekly_plan(
         _prepare_image(path, image_max_width, image_max_height, image_quality)
         for path in photo_paths
     ]
-    log_dir = _create_ai_log_dir(started_at)
     _write_json(
         log_dir / "request.json",
         {
@@ -212,40 +255,34 @@ def _request_weekly_plan(
             },
         )
     except Exception as exc:
-        failed_at = datetime.now(TZ)
-        duration = time.monotonic() - started_monotonic
-        _write_json(
-            log_dir / "error.json",
-            {
-                "failed_at": failed_at.isoformat(),
-                "duration_seconds": round(duration, 3),
-                "exception_type": type(exc).__name__,
-                "message": str(exc),
-            },
-        )
-        _write_status(
-            log_dir,
+        _log_request_error(
+            log_dir, exc, api_key, started_at, started_monotonic,
             status="api_error",
-            request_started_at=started_at,
-            finished_at=failed_at,
-            duration_seconds=duration,
         )
-        logger.exception("Weekly AI request failed; log: %s", log_dir)
         raise
+    finally:
+        # Each attempt owns its client and connection pool, including failures.
+        try:
+            client.close()
+        except Exception:
+            logger.warning("Could not close AI client; log: %s", log_dir)
 
     received_at = datetime.now(TZ)
     duration = time.monotonic() - started_monotonic
     raw_text = getattr(response, "output_text", "") or ""
-    _write_text(log_dir / "response.txt", raw_text)
+    _write_text(log_dir / "response.txt", _redact_error_value(raw_text, api_key))
     _write_json(
         log_dir / "response.json",
-        {
-            "response_received_at": received_at.isoformat(),
-            "duration_seconds": round(duration, 3),
-            "response_id": getattr(response, "id", None),
-            "output_text": raw_text,
-            "response": _serialize_ai_response(response),
-        },
+        _redact_error_value(
+            {
+                "response_received_at": received_at.isoformat(),
+                "duration_seconds": round(duration, 3),
+                "response_id": getattr(response, "id", None),
+                "output_text": raw_text,
+                "response": _serialize_ai_response(response),
+            },
+            api_key,
+        ),
     )
     logger.info(
         "Weekly AI response received: %s; log: %s",
@@ -271,15 +308,18 @@ def _request_weekly_plan(
         response_id = str(response_id_value) if response_id_value else None
         _write_json(
             log_dir / "error.json",
-            {
-                "failed_at": received_at.isoformat(),
-                "duration_seconds": round(duration, 3),
-                "response_id": response_id,
-                "response_status": response_status,
-                "provider_error": provider_error,
-                "code": error_code,
-                "message": error_message,
-            },
+            _redact_error_value(
+                {
+                    "failed_at": received_at.isoformat(),
+                    "duration_seconds": round(duration, 3),
+                    "response_id": response_id,
+                    "response_status": response_status,
+                    "provider_error": provider_error,
+                    "code": error_code,
+                    "message": error_message,
+                },
+                api_key,
+            ),
         )
         _write_status(
             log_dir,
@@ -288,7 +328,11 @@ def _request_weekly_plan(
             finished_at=received_at,
             duration_seconds=duration,
         )
-        raise AIProviderResponseError(error_code, error_message, response_id)
+        raise AIProviderResponseError(
+            _redact_error_value(error_code, api_key),
+            _redact_error_value(error_message, api_key),
+            _redact_error_value(response_id, api_key),
+        )
     try:
         parsed = _parse_response_json(raw_text)
     except NonJsonAIResponse:
@@ -319,6 +363,81 @@ def _create_ai_log_dir(timestamp: datetime) -> Path:
     )
     directory.mkdir(parents=True, exist_ok=False)
     return directory
+
+
+def _load_plan_schema() -> Dict[str, Any]:
+    """Give the model the same limits that the local plan validator uses."""
+    max_seconds = float(os.getenv("MAX_WATERING_SECONDS", "30"))
+    max_events = int(os.getenv("MAX_WATERING_EVENTS", "21"))
+    if not math.isfinite(max_seconds) or max_seconds < 1:
+        raise RuntimeError("MAX_WATERING_SECONDS must be a finite number >= 1")
+    if max_events < 1:
+        raise RuntimeError("MAX_WATERING_EVENTS must be >= 1")
+    schema = _read_json(PLAN_SCHEMA_PATH)
+    properties = schema["properties"]
+    properties["timezone"]["enum"] = [BOT_TIMEZONE]
+    watering = properties["watering"]
+    watering["maxItems"] = max_events
+    watering["items"]["properties"]["duration_seconds"]["maximum"] = max_seconds
+    return schema
+
+
+def _redact_error_value(value: Any, api_key: str) -> Any:
+    """Remove the credential if a provider echoes it in an error response."""
+    if isinstance(value, str):
+        return value.replace(api_key, "[REDACTED]") if api_key else value
+    if isinstance(value, dict):
+        return {
+            _redact_error_value(str(key), api_key): _redact_error_value(item, api_key)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_error_value(item, api_key) for item in value]
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return _redact_error_value(_serialize_ai_response(value), api_key)
+
+
+def _log_request_error(
+    log_dir: Path,
+    exc: Exception,
+    api_key: str,
+    started_at: datetime,
+    started_monotonic: float,
+    status: str,
+) -> None:
+    failed_at = datetime.now(TZ)
+    duration = time.monotonic() - started_monotonic
+    body = getattr(exc, "body", None)
+    http_response = getattr(exc, "response", None)
+    if body is None and http_response is not None:
+        try:
+            body = http_response.json()
+        except Exception:
+            body = getattr(http_response, "text", None)
+    _write_json(
+        log_dir / "error.json",
+        _redact_error_value(
+            {
+                "failed_at": failed_at.isoformat(),
+                "duration_seconds": round(duration, 3),
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+                "http_status_code": getattr(exc, "status_code", None),
+                "request_id": getattr(exc, "request_id", None),
+                "response_body": body,
+            },
+            api_key,
+        ),
+    )
+    _write_status(
+        log_dir, status, started_at,
+        finished_at=failed_at, duration_seconds=duration,
+    )
+    logger.error(
+        "Weekly AI request failed (%s): %s; log: %s",
+        type(exc).__name__, _redact_error_value(str(exc), api_key), log_dir,
+    )
 
 
 def _photo_log_entry(path: Path) -> Dict[str, Any]:

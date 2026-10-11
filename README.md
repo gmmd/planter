@@ -7,7 +7,7 @@ manual watering command records and returns a video.
 ## Requirements
 
 - Raspberry Pi OS Bookworm (or newer) with a supported camera
-- Python 3.9+
+- Python 3.10+
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 
 Test the camera before installing the bot:
@@ -52,13 +52,21 @@ sudo systemctl restart telegram-camera-bot
 ```
 
 Then open the bot in Telegram. The bot registers `/start`, `/help`,
-`/take_photo`, `/water_lemon`, `/water_pepper`, `/weekly_report`, and
-`/schedule` in Telegram's Menu button on every startup. `/schedule` immediately
+`/take_photo`, `/water_lemon`, `/water_pepper`, `/get_schedule`, and
+`/read_schedule` in Telegram's Menu button on every startup. `/get_schedule` immediately
 sends up to seven photos at `PICK_DAILY_PHOTO_TIME` from the past seven days (one per day) and the
 current sensor values to AI, installs the validated watering plan, and replies
 to the requesting chat with the full schedule and human recommendations. It
 always calls the API, even when the offline `AI_RESPONSE_FILE` test setting is
 configured.
+
+`/get_schedule` replaces the current watering plan after validation, then sends
+the plan and recommendations only to the chat that invoked it. If the request or
+installation fails, the previous plan stays in place. `/read_schedule` reads
+`data/watering_plan.json` and sends the last accepted plan to the calling chat;
+it does not call AI, take photos, save files or change watering jobs. It also
+shows plans from previous weeks, with elapsed events marked as past. The former
+`/weekly_report` and `/schedule` commands have been removed.
 
 ## Weekly automation
 
@@ -82,12 +90,12 @@ The service uses `Europe/Moscow` by default and runs these jobs:
 - sends the full watering schedule followed by human recommendations to
   `REPORT_CHAT_IDS`, along with automation errors when they occur.
 
-Automatic weekly reports, `/weekly_report`, and `/schedule` use the same readable
+Automatic weekly reports, `/get_schedule`, and `/read_schedule` use the same readable
 Telegram format: a week-start heading, one line per watering event with its date,
 time, plant, duration and status, then a `Рекомендации:` section. JSON remains the
 internal format used to validate, save and schedule watering. Long reports are
-split across messages without truncation. `/weekly_report` also sends the report
-to the requesting chat; duplicate chat IDs receive it only once.
+split across messages without truncation. Automatic Monday reports still go to
+`REPORT_CHAT_IDS`; manual schedule commands reply only to the calling chat.
 
 The times can be changed in `.env`:
 
@@ -112,8 +120,8 @@ On the first start after upgrading, JPEG files from the old
 `data/photos/YYYY-MM-DD/` layout are moved into the single `data/photos/`
 directory and receive date-prefixed filenames.
 
-Use `/weekly_report` to run the weekly cycle manually. It requires at least one
-photo at `PICK_DAILY_PHOTO_TIME` from the preceding seven days. `/schedule` uses the same selection.
+Use `/get_schedule` to run the weekly cycle manually. It requires at least one
+photo at `PICK_DAILY_PHOTO_TIME` from the preceding seven days.
 Capture times come from archive filenames in `BOT_TIMEZONE`, not file modification
 times. Only photos from the configured minute qualify; if there are duplicates, the
 earliest one is used. Missing days are not filled with older photos or photos at other times.
@@ -176,7 +184,7 @@ Every real AI API call is archived under
 
 - `request.json` — dated request parameters, report, schema, and photo
   metadata (without the API key or duplicate base64 image data);
-- `response.txt` — the complete unmodified text returned by AI;
+- `response.txt` — the complete text returned by AI;
 - `response.json` — the complete SDK response, including metadata and usage when
   supplied by the provider;
 - `status.json` — timestamps, duration, and the final request status (including
@@ -184,6 +192,8 @@ Every real AI API call is archived under
 - `parsed_plan.json` for a valid JSON response, or `error.json` if the API call
   failed.
 
+The configured API key is replaced with `[REDACTED]` if a provider echoes it in
+the archived response or error details. Other response fields are retained.
 The original JPEG files referenced by each request remain in `data/photos/`.
 
 If the model returns text instead of a JSON object, the bot sends the complete
@@ -200,7 +210,8 @@ stated in the AI instruction and enforced independently by `automation.py`
 after JSON parsing.
 
 For an offline test without making an API request, point `AI_RESPONSE_FILE` at
-a response JSON file. This setting takes precedence over the API:
+a response JSON file. This setting takes precedence over the API for the
+automatic weekly cycle; `/get_schedule` always requests a new plan through the API:
 
 ```bash
 AI_RESPONSE_FILE=/absolute/path/to/schemas/weekly_plan.example.json
@@ -233,8 +244,8 @@ first installation or to recreate the systemd unit.
 
 `LEMON_PUMP_GPIO=17` uses **BCM GPIO17** (physical header pin 11).
 `PEPPER_PUMP_GPIO` must be set to the BCM pin actually connected to the second
-relay. It is deliberately blank by default, so pepper watering remains disabled
-until the real pin is configured. The two GPIO numbers must be different.
+relay. The example uses `27`; leave it blank to disable pepper watering until the
+real pin is configured. The two GPIO numbers must be different.
 
 The lemon relay is controlled by toggle pulses: one GPIO17 LOW/HIGH/LOW pulse
 starts the pump and a second pulse stops it after the watering interval. The
@@ -266,7 +277,7 @@ sudo systemctl restart telegram-camera-bot
 
 Watering video defaults to 640×480 at 24 fps and 2 Mbps for quick camera startup
 and upload. It includes a one-second lead-in and half-second lead-out so the full
-five-second pump cycle is visible. These values can be adjusted with the
+configured pump cycle is visible. These values can be adjusted with the
 `VIDEO_*` settings shown in `.env.example`.
 
 To remove only the systemd service (preserving the project and configuration):
@@ -274,3 +285,25 @@ To remove only the systemd service (preserving the project and configuration):
 ```bash
 ./scripts/uninstall_service.sh
 ```
+
+## Verification and maintenance
+
+Run regression tests with the Python dependencies installed (no connected camera,
+GPIO, Telegram token or AI credentials are needed):
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+The tests use real aiogram, APScheduler and Pillow with mocked network and
+hardware boundaries. They cover command routing, read-only schedule access,
+plan replacement rollback, photo selection, AI responses/logs, and cleanup on
+cancellation. Hardware workers finish their cleanup before releasing camera/pump
+locks or temporary video files. Shutdown waits for those workers before closing
+GPIO resources, following Python's [task cancellation and shielding guidance](https://docs.python.org/3/library/asyncio-task.html#shielding-from-cancellation).
+
+Plan replacement does not interrupt a watering already in progress; an old job
+still waiting for the camera or pump is discarded after a newer plan is accepted.
+Photos appear in the archive only after capture and watermarking have completed.
+An abrupt power loss cannot be handled by software cleanup: a toggle relay's
+physical state cannot be inferred from the GPIO output alone.

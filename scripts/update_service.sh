@@ -39,12 +39,7 @@ chmod 600 "${PROJECT_DIR}/.env"
 UPDATE_CACHE_DIR="$(mktemp -d)"
 trap 'rm -rf -- "${UPDATE_CACHE_DIR}"' EXIT
 PYTHONPYCACHEPREFIX="${UPDATE_CACHE_DIR}" \
-  "${PYTHON_BIN}" -m py_compile \
-  "${PROJECT_DIR}/bot.py" \
-  "${PROJECT_DIR}/automation.py" \
-  "${PROJECT_DIR}/ai_client.py" \
-  "${PROJECT_DIR}/sensors.py" \
-  "${PROJECT_DIR}/photo_watermark.py"
+  "${PYTHON_BIN}" -m py_compile "${PROJECT_DIR}"/*.py
 
 sudo systemctl daemon-reload
 sudo systemctl enable "${SERVICE_UNIT}" >/dev/null

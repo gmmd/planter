@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import tempfile
 import time
@@ -21,6 +22,7 @@ from picamera2.encoders import H264Encoder
 from picamera2.outputs import FfmpegOutput
 
 from automation import PICK_DAILY_PHOTO_TIME, PlantAutomation, TZ, new_photo_path
+from hardware_tasks import hardware_tasks
 from photo_watermark import add_photo_watermark
 from sensors import read_sensor_snapshot
 
@@ -51,19 +53,30 @@ VIDEO_LEAD_IN_SECONDS = float(os.getenv("VIDEO_LEAD_IN_SECONDS", "1"))
 VIDEO_LEAD_OUT_SECONDS = float(os.getenv("VIDEO_LEAD_OUT_SECONDS", "0.5"))
 # Both GPIO outputs are active-high: LOW is idle and HIGH drives the pump input.
 # Lemon uses short toggle pulses; pepper stays HIGH for the watering interval.
-pumps = {
-    "pump_lemon": OutputDevice(
-        LEMON_PUMP_GPIO, active_high=True, initial_value=False
-    )
-}
-if PEPPER_PUMP_GPIO_TEXT:
-    if int(PEPPER_PUMP_GPIO_TEXT) == LEMON_PUMP_GPIO:
+pumps: dict[str, OutputDevice] = {}
+
+
+def initialize_pumps() -> None:
+    """Validate configuration before acquiring GPIO resources."""
+    if PEPPER_PUMP_GPIO_TEXT and int(PEPPER_PUMP_GPIO_TEXT) == LEMON_PUMP_GPIO:
         raise RuntimeError("LEMON_PUMP_GPIO and PEPPER_PUMP_GPIO must be different")
-    pumps["pump_pepper"] = OutputDevice(
-        int(PEPPER_PUMP_GPIO_TEXT), active_high=True, initial_value=False
-    )
-if not 0.02 <= LEMON_TOGGLE_PULSE_SECONDS <= 2:
-    raise RuntimeError("LEMON_TOGGLE_PULSE_SECONDS must be between 0.02 and 2")
+    if not 0.02 <= LEMON_TOGGLE_PULSE_SECONDS <= 2:
+        raise RuntimeError("LEMON_TOGGLE_PULSE_SECONDS must be between 0.02 and 2")
+    for name, value in (
+        ("LEMON_WATERING_SECONDS", LEMON_WATERING_SECONDS),
+        ("PEPPER_WATERING_SECONDS", PEPPER_WATERING_SECONDS),
+        ("VIDEO_FRAMERATE", VIDEO_FRAMERATE),
+    ):
+        if not math.isfinite(value) or value <= 0:
+            raise RuntimeError(f"{name} must be finite and positive")
+    for value in (VIDEO_LEAD_IN_SECONDS, VIDEO_LEAD_OUT_SECONDS):
+        if not math.isfinite(value) or value < 0:
+            raise RuntimeError("Video lead times must be finite and non-negative")
+    pumps["pump_lemon"] = OutputDevice(LEMON_PUMP_GPIO, active_high=True, initial_value=False)
+    if PEPPER_PUMP_GPIO_TEXT:
+        pumps["pump_pepper"] = OutputDevice(
+            int(PEPPER_PUMP_GPIO_TEXT), active_high=True, initial_value=False
+        )
 
 
 def _sleep_until(deadline: float) -> None:
@@ -76,7 +89,20 @@ def _sleep_until(deadline: float) -> None:
 
 def stop_all_pumps() -> None:
     for configured_pump in pumps.values():
-        configured_pump.off()
+        try:
+            configured_pump.off()
+        except Exception:
+            logger.exception("Could not return GPIO output to idle")
+
+
+def close_pumps() -> None:
+    stop_all_pumps()
+    for configured_pump in pumps.values():
+        try:
+            configured_pump.close()
+        except Exception:
+            logger.exception("Could not close GPIO output")
+    pumps.clear()
 
 
 def _toggle_pulse(selected_pump: OutputDevice) -> None:
@@ -133,6 +159,15 @@ def is_allowed(message: Message) -> bool:
 
 def capture_photo(path: Path) -> None:
     """Capture one JPEG with the first available Raspberry Pi camera."""
+    temporary = path.with_name(f".{path.stem}.pending.jpg")
+    try:
+        _capture_photo(temporary)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _capture_photo(path: Path) -> None:
     camera = Picamera2()
     try:
         width = int(os.getenv("PHOTO_WIDTH", "1920"))
@@ -152,6 +187,11 @@ def run_watering_with_video(
     path: Path, pump_id: str, duration_seconds: float
 ) -> None:
     """Record video before, during, and after one configured pump cycle."""
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        raise ValueError("Watering duration must be finite and positive")
+    selected_pump = pumps.get(pump_id)
+    if selected_pump is None:
+        raise RuntimeError(f"Pump {pump_id} is not configured")
     camera = Picamera2()
     recording = False
     try:
@@ -174,17 +214,16 @@ def run_watering_with_video(
         # Give the encoder time to produce frames before watering begins.
         time.sleep(VIDEO_LEAD_IN_SECONDS)
 
-        selected_pump = pumps.get(pump_id)
-        if selected_pump is None:
-            raise RuntimeError(f"Pump {pump_id} is not configured")
         _run_pump_cycle(selected_pump, pump_id, duration_seconds)
         time.sleep(VIDEO_LEAD_OUT_SECONDS)
     finally:
         # The pump must be turned off even if camera recording fails.
         stop_all_pumps()
-        if recording:
-            camera.stop_recording()
-        camera.close()
+        try:
+            if recording:
+                camera.stop_recording()
+        finally:
+            camera.close()
 
 
 @router.message(CommandStart())
@@ -211,10 +250,10 @@ async def help_command(message: Message) -> None:
         "видео полива.\n"
         f"/water_pepper — поливать перец {PEPPER_WATERING_SECONDS:g} сек. и отправить "
         "видео полива.\n"
-        "/weekly_report — вручную подготовить недельный набор фотографий и "
-        "запрос к нейросети.\n"
-        "/schedule — принудительно запросить у нейросети расписание и получить "
-        "его в этом чате.\n"
+        "/get_schedule — запросить у AI новый план, заменить расписание полива "
+        "и получить его с рекомендациями в этом чате.\n"
+        "/read_schedule — показать последнее сохранённое расписание и рекомендации "
+        "без запроса к AI и изменений полива.\n"
         "/help — показать эту справку.\n\n"
         "По умолчанию бот делает фотографии каждый час с 08:00 до 20:00 включительно "
         "(расписание задаётся в DAILY_PHOTO_TIMES). Для отчёта берёт до 7 снимков "
@@ -238,11 +277,11 @@ async def take_photo(message: Message) -> None:
     try:
         async with camera_lock:
             photo_path = new_photo_path()
-            await asyncio.to_thread(capture_photo, photo_path)
-            await message.answer_photo(
-                FSInputFile(photo_path),
-                caption="Photo from Raspberry Pi",
-            )
+            await hardware_tasks.run(capture_photo, photo_path)
+        await message.answer_photo(
+            FSInputFile(photo_path),
+            caption="Photo from Raspberry Pi",
+        )
         await status.delete()
     except Exception:
         logger.exception("Could not capture or send photo")
@@ -271,26 +310,27 @@ async def _water_plant(
 
     status = await message.answer(f"Поливаю {plant_name} и записываю видео…")
     try:
-        async with camera_lock:
-            async with pump_lock:
-                with tempfile.TemporaryDirectory(prefix="telegram-watering-") as temp_dir:
-                    video_path = Path(temp_dir) / "watering.mp4"
-                    await asyncio.to_thread(
+        with tempfile.TemporaryDirectory(prefix="telegram-watering-") as temp_dir:
+            video_path = Path(temp_dir) / "watering.mp4"
+            async with camera_lock:
+                async with pump_lock:
+                    await hardware_tasks.run(
                         run_watering_with_video,
                         video_path,
                         pump_id,
                         duration_seconds,
                     )
-                    await message.answer_video(
-                        FSInputFile(video_path),
-                        caption=f"{plant_name.capitalize()}: полив {duration_seconds:g} сек.",
-                        supports_streaming=True,
-                    )
+            await message.answer_video(
+                FSInputFile(video_path),
+                caption=f"{plant_name.capitalize()}: полив {duration_seconds:g} сек.",
+                supports_streaming=True,
+            )
         await status.delete()
     except Exception:
         logger.exception("Could not water plant or send video")
-        stop_all_pumps()
-        await status.edit_text("Watering or recording failed. The pump was switched off.")
+        # Hardware cleanup belongs to the worker; another watering may already
+        # be using the released locks while this video's upload fails.
+        await status.edit_text("Полив, запись или отправка видео завершились ошибкой. Проверьте журнал службы.")
 
 
 @router.message(Command("water_lemon"))
@@ -307,21 +347,19 @@ async def water_pepper(message: Message) -> None:
     )
 
 
-@router.message(Command("weekly_report"))
-async def weekly_report(message: Message) -> None:
+@router.message(Command("read_schedule"))
+async def read_schedule(message: Message) -> None:
     if not is_allowed(message):
         await message.answer("Access denied.")
         return
     if automation_controller is None:
         await message.answer("Automation scheduler is not ready.")
         return
-    status = await message.answer("Preparing the weekly photos and AI request…")
-    result = await automation_controller.run_weekly_cycle(reply_chat_id=message.chat.id)
-    await status.edit_text(result)
+    await automation_controller.read_schedule(message.chat.id)
 
 
-@router.message(Command("schedule"))
-async def schedule(message: Message) -> None:
+@router.message(Command("get_schedule"))
+async def get_schedule(message: Message) -> None:
     if not is_allowed(message):
         await message.answer("Access denied.")
         return
@@ -336,16 +374,10 @@ async def schedule(message: Message) -> None:
         notify_configured_chats=False,
         force_ai=True,
     )
-    await status.edit_text(result)
+    await status.edit_text(result if len(result) <= 4000 else result[:3999] + "…")
 
 
-async def main() -> None:
-    global automation_controller
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        raise RuntimeError("BOT_TOKEN is not set")
-
-    bot = Bot(token=token)
+async def register_commands(bot: Bot) -> None:
     try:
         await bot.set_my_commands(
             [
@@ -359,32 +391,50 @@ async def main() -> None:
                     command="water_pepper", description="Полить перец и снять видео"
                 ),
                 BotCommand(
-                    command="weekly_report", description="Запустить недельный отчёт"
+                    command="get_schedule", description="Получить новый план от AI"
                 ),
                 BotCommand(
-                    command="schedule", description="Получить расписание от AI"
+                    command="read_schedule", description="Посмотреть сохранённый план"
                 ),
             ]
         )
     except Exception:
         logger.exception("Could not register Telegram command menu")
-    dispatcher = Dispatcher()
-    dispatcher.include_router(router)
-    automation_controller = PlantAutomation(
-        bot=bot,
-        camera_lock=camera_lock,
-        pump_lock=pump_lock,
-        capture_photo=capture_photo,
-        water_with_video=run_watering_with_video,
-        available_pumps=set(pumps),
-    )
-    await automation_controller.start()
+
+
+async def main() -> None:
+    global automation_controller
+    token = os.getenv("BOT_TOKEN")
+    if not token:
+        raise RuntimeError("BOT_TOKEN is not set")
+    allowed_user_ids()
+    bot = Bot(token=token)
     try:
-        await dispatcher.start_polling(bot)
+        initialize_pumps()
+        dispatcher = Dispatcher()
+        dispatcher.include_router(router)
+        automation_controller = PlantAutomation(
+            bot=bot,
+            camera_lock=camera_lock,
+            pump_lock=pump_lock,
+            capture_photo=capture_photo,
+            water_with_video=run_watering_with_video,
+            available_pumps=set(pumps),
+        )
+        await automation_controller.start()
+        await register_commands(bot)
+        await dispatcher.start_polling(bot, close_bot_session=False)
     finally:
-        automation_controller.shutdown()
-        stop_all_pumps()
-        await bot.session.close()
+        try:
+            try:
+                if automation_controller is not None:
+                    automation_controller.shutdown()
+            finally:
+                await hardware_tasks.close()
+        finally:
+            close_pumps()
+            automation_controller = None
+            await bot.session.close()
 
 
 if __name__ == "__main__":

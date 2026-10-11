@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -21,6 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from ai_client import NonJsonAIResponse, request_weekly_plan
+from hardware_tasks import hardware_tasks
 from sensors import read_sensor_snapshot
 
 
@@ -55,7 +57,7 @@ def _parse_chat_ids() -> List[int]:
     raw = os.getenv("REPORT_CHAT_IDS", "").strip()
     if not raw:
         raw = os.getenv("ALLOWED_USER_IDS", "").strip()
-    return [int(item.strip()) for item in raw.split(",") if item.strip()]
+    return list(dict.fromkeys(int(item.strip()) for item in raw.split(",") if item.strip()))
 
 
 def _parse_photo_times() -> List[time]:
@@ -179,9 +181,14 @@ class PlantAutomation:
         self.available_pumps = available_pumps
         self.chat_ids = _parse_chat_ids()
         self.weekly_cycle_lock = asyncio.Lock()
+        self._plan_revision = 0
         self.scheduler = AsyncIOScheduler(timezone=TZ)
 
     async def start(self) -> None:
+        if not math.isfinite(MAX_WATERING_SECONDS) or MAX_WATERING_SECONDS < 1:
+            raise RuntimeError("MAX_WATERING_SECONDS must be finite and at least 1")
+        if MAX_WATERING_EVENTS < 1:
+            raise RuntimeError("MAX_WATERING_EVENTS must be at least 1")
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         migrated = _migrate_legacy_photo_layout()
         if migrated:
@@ -220,7 +227,7 @@ class PlantAutomation:
     async def _notify(self, text: str) -> None:
         for chat_id in self.chat_ids:
             try:
-                await self.bot.send_message(chat_id, text[:4096])
+                await self._send_long_message(chat_id, text)
             except Exception:
                 logger.exception("Could not notify Telegram chat %s", chat_id)
 
@@ -228,7 +235,7 @@ class PlantAutomation:
         try:
             async with self.camera_lock:
                 path = new_photo_path()
-                await asyncio.to_thread(self.capture_photo, path)
+                await hardware_tasks.run(self.capture_photo, path)
             logger.info("Daily photo saved to %s", path)
         except Exception:
             logger.exception("Scheduled daily photo failed")
@@ -243,11 +250,30 @@ class PlantAutomation:
         if self.weekly_cycle_lock.locked():
             return "Недельный запрос уже выполняется. Дождитесь его завершения."
         async with self.weekly_cycle_lock:
-            return await self._run_weekly_cycle(
-                reply_chat_id=reply_chat_id,
-                notify_configured_chats=notify_configured_chats,
-                force_ai=force_ai,
-            )
+            try:
+                return await self._run_weekly_cycle(
+                    reply_chat_id=reply_chat_id,
+                    notify_configured_chats=notify_configured_chats,
+                    force_ai=force_ai,
+                )
+            except Exception:
+                logger.exception("Weekly cycle failed outside the AI request")
+                message = "Не удалось подготовить или отправить отчёт. Подробности в журнале службы."
+                if notify_configured_chats:
+                    await self._notify(message)
+                return message
+
+    async def read_schedule(self, chat_id: int) -> None:
+        """Show the last accepted plan, including old weeks, without applying it."""
+        try:
+            plan = await asyncio.to_thread(_read_json, PLAN_FILE)
+            formatted = self._format_plan(plan)
+        except FileNotFoundError:
+            formatted = "Сохранённого расписания пока нет. Используйте /get_schedule."
+        except Exception:
+            logger.exception("Could not read saved watering schedule")
+            formatted = "Не удалось прочитать сохранённое расписание. Подробности в журнале службы."
+        await self._send_long_message(chat_id, formatted)
 
     async def _run_weekly_cycle(
         self,
@@ -293,7 +319,7 @@ class PlantAutomation:
                 ],
             },
         }
-        request_path = REPORTS_DIR / f"latest_{now:%Y%m%d_%H%M%S}.request.json"
+        request_path = REPORTS_DIR / f"latest_{now:%Y%m%d_%H%M%S_%f}.request.json"
         await asyncio.to_thread(_write_json, request_path, report)
 
         try:
@@ -317,10 +343,15 @@ class PlantAutomation:
                 return "Нейросеть вернула текст вместо JSON, но отправить его не удалось."
             return "Нейросеть вернула текст вместо JSON; полный ответ отправлен в Telegram."
         except Exception as exc:
-            logger.exception("Weekly AI request failed")
+            detail = str(exc)
+            api_key = os.getenv("YANDEX_AI_API_KEY", "").strip()
+            if api_key:
+                detail = detail.replace(api_key, "[REDACTED]")
+            # Provider errors may echo credentials; do not log their raw traceback.
+            logger.error("Weekly AI request failed (%s): %s", type(exc).__name__, detail)
             if notify_configured_chats:
-                await self._notify(f"Запрос к нейросети завершился ошибкой: {exc}")
-            return f"Ошибка запроса к нейросети: {exc}"
+                await self._notify(f"Запрос к нейросети завершился ошибкой: {detail}")
+            return f"Ошибка запроса к нейросети: {detail}"
 
         if plan is None:
             if notify_configured_chats:
@@ -331,14 +362,14 @@ class PlantAutomation:
             return "Отчёт и фотографии готовы; интеграция с нейросетью пока не настроена."
 
         try:
-            accepted = self.apply_plan(plan, now=now)
+            accepted = self.apply_plan(plan)
         except Exception as exc:
-            logger.exception("AI returned an invalid watering plan")
+            logger.exception("Could not validate or install AI watering plan")
             if notify_configured_chats:
                 await self._notify(
-                    f"Нейросеть вернула некорректный план полива: {exc}"
+                    f"Не удалось принять план полива: {exc}"
                 )
-            return f"Некорректный план полива: {exc}"
+            return f"Не удалось принять план полива: {exc}"
         targets = list(self.chat_ids) if notify_configured_chats else []
         if reply_chat_id is not None:
             targets.append(reply_chat_id)
@@ -366,9 +397,12 @@ class PlantAutomation:
                 split_at = remaining.rfind("\n", 0, 4000)
                 if split_at <= 0:
                     split_at = 4000
+                # Retain the newline at the end of this chunk.
+                if split_at < 4000:
+                    split_at += 1
                 chunk = remaining[:split_at]
-                remaining = remaining[split_at:].lstrip("\n")
-            await self.bot.send_message(chat_id, chunk)
+                remaining = remaining[split_at:]
+            await self.bot.send_message(chat_id, chunk, parse_mode=None)
 
     async def _stream_ai_text(self, chat_id: int, text: str) -> None:
         """Animate non-JSON AI text with sendMessageDraft, then persist it."""
@@ -411,6 +445,7 @@ class PlantAutomation:
 
     @staticmethod
     def _format_plan(plan: Dict[str, Any]) -> str:
+        current = datetime.now(TZ)
         plant_names = {"lemon": "лимон", "pepper": "перец"}
         lines = [
             f"Расписание полива на неделю с {plan['week_start']}:",
@@ -421,7 +456,11 @@ class PlantAutomation:
             for event in events:
                 start_at = datetime.fromisoformat(event["start_at"]).astimezone(TZ)
                 plant = plant_names.get(event["plant_id"], event["plant_id"])
-                state = "запланировано" if event["will_run"] else "время уже прошло"
+                state = (
+                    "запланировано"
+                    if event.get("will_run", True) and start_at > current
+                    else "время уже прошло"
+                )
                 lines.append(
                     f"• {start_at:%d.%m %H:%M} — {plant}, "
                     f"{event['duration_seconds']:g} сек. ({state})"
@@ -463,8 +502,8 @@ class PlantAutomation:
         for event in watering:
             if not isinstance(event, dict):
                 raise ValueError("Each watering entry must be an object")
-            event_id = str(event.get("id", ""))
-            if not EVENT_ID_RE.fullmatch(event_id) or event_id in event_ids:
+            event_id = event.get("id", "")
+            if not isinstance(event_id, str) or not EVENT_ID_RE.fullmatch(event_id) or event_id in event_ids:
                 raise ValueError(f"Invalid or duplicate watering id: {event_id!r}")
             event_ids.add(event_id)
             plant_id = str(event.get("plant_id", ""))
@@ -478,7 +517,10 @@ class PlantAutomation:
                 raise ValueError(f"Pump {pump_id} is not configured")
             try:
                 start_at = datetime.fromisoformat(str(event["start_at"]))
-                duration = float(event["duration_seconds"])
+                raw_duration = event["duration_seconds"]
+                if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)):
+                    raise ValueError("duration_seconds must be a number")
+                duration = float(raw_duration)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ValueError(f"Invalid watering event {event_id}") from exc
             if start_at.tzinfo is None:
@@ -486,7 +528,7 @@ class PlantAutomation:
             local_start = start_at.astimezone(TZ)
             if not week_start <= local_start.date() < week_start + timedelta(days=7):
                 raise ValueError(f"Watering event is outside week_start: {event_id}")
-            if not 1 <= duration <= MAX_WATERING_SECONDS:
+            if not math.isfinite(duration) or not 1 <= duration <= MAX_WATERING_SECONDS:
                 raise ValueError(
                     f"duration_seconds for {event_id} must be 1..{MAX_WATERING_SECONDS:g}"
                 )
@@ -519,22 +561,41 @@ class PlantAutomation:
         self, plan: Dict[str, Any], now: Optional[datetime] = None
     ) -> Dict[str, Any]:
         accepted = self._validate_plan(plan, now=now)
-        for job in self.scheduler.get_jobs():
-            if job.id.startswith("watering:"):
+        revision = self._plan_revision + 1
+        old_jobs = [job for job in self.scheduler.get_jobs() if job.id.startswith("watering:")]
+        try:
+            for job in old_jobs:
                 self.scheduler.remove_job(job.id)
-        for event in accepted["watering"]:
-            if not event["will_run"]:
-                continue
-            start_at = datetime.fromisoformat(event["start_at"])
-            self.scheduler.add_job(
-                self._run_scheduled_watering,
-                DateTrigger(run_date=start_at),
-                kwargs={"event": event},
-                id=f"watering:{event['id']}",
-                replace_existing=True,
-                misfire_grace_time=300,
-            )
-        _write_json(PLAN_FILE, accepted)
+            for event in accepted["watering"]:
+                if not event["will_run"]:
+                    continue
+                self.scheduler.add_job(
+                    self._run_scheduled_watering,
+                    DateTrigger(run_date=datetime.fromisoformat(event["start_at"])),
+                    kwargs={"event": event, "revision": revision},
+                    id=f"watering:{event['id']}",
+                    replace_existing=True,
+                    misfire_grace_time=300,
+                )
+            _write_json(PLAN_FILE, accepted)
+        except Exception:
+            # This synchronous section never yields to the event loop, so no
+            # newly installed job can start before the plan has been persisted.
+            for job in self.scheduler.get_jobs():
+                if job.id.startswith("watering:"):
+                    self.scheduler.remove_job(job.id)
+            for job in old_jobs:
+                options = {}
+                if hasattr(job, "next_run_time"):
+                    options["next_run_time"] = job.next_run_time
+                self.scheduler.add_job(
+                    job.func, job.trigger, args=job.args, kwargs=job.kwargs,
+                    id=job.id, replace_existing=True,
+                    misfire_grace_time=job.misfire_grace_time,
+                    **options,
+                )
+            raise
+        self._plan_revision = revision
         return accepted
 
     def _restore_saved_plan(self) -> None:
@@ -545,7 +606,9 @@ class PlantAutomation:
         except Exception:
             logger.exception("Saved watering plan could not be restored")
 
-    async def _run_scheduled_watering(self, event: Dict[str, Any]) -> None:
+    async def _run_scheduled_watering(
+        self, event: Dict[str, Any], revision: Optional[int] = None
+    ) -> None:
         duration = float(event["duration_seconds"])
         plant_names = {"lemon": "Лимон", "pepper": "Перец"}
         plant_name = plant_names.get(str(event["plant_id"]), str(event["plant_id"]))
@@ -554,7 +617,10 @@ class PlantAutomation:
             try:
                 async with self.camera_lock:
                     async with self.pump_lock:
-                        await asyncio.to_thread(
+                        if revision is not None and revision != self._plan_revision:
+                            logger.info("Skipped superseded watering event %s", event["id"])
+                            return
+                        await hardware_tasks.run(
                             self.water_with_video,
                             video_path,
                             str(event["pump_id"]),

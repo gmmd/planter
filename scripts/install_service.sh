@@ -29,6 +29,11 @@ python3 -m venv --system-site-packages "${PROJECT_DIR}/.venv"
 "${PROJECT_DIR}/.venv/bin/pip" install -r "${PROJECT_DIR}/requirements.txt"
 chmod 600 "${PROJECT_DIR}/.env"
 
+INSTALL_CACHE_DIR="$(mktemp -d)"
+trap 'rm -rf -- "${INSTALL_CACHE_DIR}"' EXIT
+PYTHONPYCACHEPREFIX="${INSTALL_CACHE_DIR}" \
+  "${PYTHON_BIN}" -m py_compile "${PROJECT_DIR}"/*.py
+
 sudo tee "${SERVICE_FILE}" >/dev/null <<EOF
 [Unit]
 Description=Telegram Raspberry Pi Camera Bot
@@ -52,7 +57,9 @@ WantedBy=multi-user.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now "${SERVICE_NAME}.service"
+sudo systemctl enable "${SERVICE_NAME}.service"
+# Reinstalling a unit must also apply it to an already running process.
+sudo systemctl restart "${SERVICE_NAME}.service"
 
 if ! sudo systemctl is-active --quiet "${SERVICE_NAME}.service"; then
   echo "Service was installed but did not become active." >&2
