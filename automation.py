@@ -109,7 +109,7 @@ def _weekly_photo_paths(now: Optional[datetime] = None) -> List[Path]:
         captured_at = _photo_captured_at(path)
         if captured_at is None or not window_start < captured_at <= current:
             continue
-        if (captured_at.hour, captured_at.minute) != (12, 0):
+        if (captured_at.hour, captured_at.minute) != (PICK_DAILY_PHOTO_TIME[0], PICK_DAILY_PHOTO_TIME[1]):
             continue
         previous = by_day.get(captured_at.date())
         if previous is None or captured_at < previous[0]:
@@ -249,7 +249,7 @@ class PlantAutomation:
         now = datetime.now(TZ)
         photos = _weekly_photo_paths(now)
         if not photos:
-            message = "Нет фотографий, сделанных в {PICK_DAILY_PHOTO_TIME} за последние 7 дней."
+            message = f"Нет фотографий, сделанных в {PICK_DAILY_PHOTO_TIME} за последние 7 дней."
             if notify_configured_chats:
                 await self._notify(message)
             return message
