@@ -34,7 +34,8 @@ BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
 TZ = ZoneInfo(BOT_TIMEZONE)
 MAX_WATERING_SECONDS = float(os.getenv("MAX_WATERING_SECONDS", "30"))
 MAX_WATERING_EVENTS = int(os.getenv("MAX_WATERING_EVENTS", "21"))
-AI_PHOTO_LIMIT = min(int(os.getenv("AI_PHOTO_LIMIT", "16")), 16)
+WEEKLY_PHOTO_DAYS = 7
+DEFAULT_PHOTO_TIMES = ",".join(f"{hour:02d}:00" for hour in range(8, 21))
 TELEGRAM_STREAM_STEP_CHARS = int(os.getenv("TELEGRAM_STREAM_STEP_CHARS", "400"))
 TELEGRAM_STREAM_INTERVAL_SECONDS = float(
     os.getenv("TELEGRAM_STREAM_INTERVAL_SECONDS", "0.3")
@@ -57,7 +58,7 @@ def _parse_chat_ids() -> List[int]:
 
 
 def _parse_photo_times() -> List[time]:
-    raw = os.getenv("DAILY_PHOTO_TIMES", "10:30,12:30,15:00")
+    raw = os.getenv("DAILY_PHOTO_TIMES", DEFAULT_PHOTO_TIMES)
     result: List[time] = []
     for item in raw.split(","):
         try:
@@ -67,9 +68,7 @@ def _parse_photo_times() -> List[time]:
             raise RuntimeError(
                 "DAILY_PHOTO_TIMES must contain comma-separated HH:MM values"
             ) from exc
-    if len(result) != 3:
-        raise RuntimeError("DAILY_PHOTO_TIMES must contain exactly three times")
-    return result
+    return sorted(set(result))
 
 
 def _write_json(path: Path, value: Dict[str, Any]) -> None:
@@ -89,11 +88,32 @@ def _read_json(path: Path) -> Dict[str, Any]:
     return value
 
 
-def _latest_photo_paths(limit: int = AI_PHOTO_LIMIT) -> List[Path]:
-    if limit < 1:
-        raise RuntimeError("AI_PHOTO_LIMIT must be at least 1")
-    photos = sorted(PHOTOS_DIR.glob("*.jpg"), key=lambda path: path.stat().st_mtime)
-    return photos[-limit:]
+def _photo_captured_at(path: Path) -> Optional[datetime]:
+    """Read capture time from archive names, including migrated duplicate suffixes."""
+    match = re.fullmatch(r"(\d{8}_\d{6}_\d{6})(?:_\d+)?", path.stem)
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d_%H%M%S_%f").replace(tzinfo=TZ)
+    except ValueError:
+        return None
+
+
+def _weekly_photo_paths(now: Optional[datetime] = None) -> List[Path]:
+    """Select one 12:00 photo per day within the preceding seven days."""
+    current = (now or datetime.now(TZ)).astimezone(TZ)
+    window_start = current - timedelta(days=WEEKLY_PHOTO_DAYS)
+    by_day: Dict[date, tuple[datetime, Path]] = {}
+    for path in sorted(PHOTOS_DIR.glob("*.jpg")):
+        captured_at = _photo_captured_at(path)
+        if captured_at is None or not window_start < captured_at <= current:
+            continue
+        if (captured_at.hour, captured_at.minute) != (12, 0):
+            continue
+        previous = by_day.get(captured_at.date())
+        if previous is None or captured_at < previous[0]:
+            by_day[captured_at.date()] = (captured_at, path)
+    return [by_day[day][1] for day in sorted(by_day)[-WEEKLY_PHOTO_DAYS:]]
 
 
 def new_photo_path(timestamp: Optional[datetime] = None) -> Path:
@@ -195,10 +215,9 @@ class PlantAutomation:
                 logger.exception("Could not notify Telegram chat %s", chat_id)
 
     async def capture_daily_photo(self) -> None:
-        now = datetime.now(TZ)
-        path = new_photo_path(now)
         try:
             async with self.camera_lock:
+                path = new_photo_path()
                 await asyncio.to_thread(self.capture_photo, path)
             logger.info("Daily photo saved to %s", path)
         except Exception:
@@ -227,9 +246,9 @@ class PlantAutomation:
         force_ai: bool,
     ) -> str:
         now = datetime.now(TZ)
-        photos = _latest_photo_paths()
+        photos = _weekly_photo_paths(now)
         if not photos:
-            message = "Нет фотографий для отправки нейросети."
+            message = "Нет фотографий, сделанных в 12:00 за последние 7 дней."
             if notify_configured_chats:
                 await self._notify(message)
             return message
@@ -240,8 +259,11 @@ class PlantAutomation:
             "report_generated_at": now.isoformat(),
             "timezone": BOT_TIMEZONE,
             "photo_selection": {
-                "strategy": "latest",
-                "limit": AI_PHOTO_LIMIT,
+                "strategy": "daily_noon_last_7_days",
+                "limit": WEEKLY_PHOTO_DAYS,
+                "capture_time": "12:00",
+                "window_start": (now - timedelta(days=WEEKLY_PHOTO_DAYS)).isoformat(),
+                "window_end": now.isoformat(),
                 "selected_count": len(photos),
             },
             "environment": {
@@ -255,9 +277,7 @@ class PlantAutomation:
                 "photos": [
                     {
                         "filename": photo.name,
-                        "captured_at": datetime.fromtimestamp(
-                            photo.stat().st_mtime, TZ
-                        ).isoformat(),
+                        "captured_at": _photo_captured_at(photo).isoformat(),
                     }
                     for photo in photos
                 ],
@@ -309,19 +329,21 @@ class PlantAutomation:
                     f"Нейросеть вернула некорректный план полива: {exc}"
                 )
             return f"Некорректный план полива: {exc}"
-        recommendations = str(accepted.get("human_recommendations", "")).strip()
-        if notify_configured_chats:
-            if recommendations:
-                await self._notify("Рекомендации на неделю:\n\n" + recommendations)
-            await self._notify(
-                f"Принято заданий полива на неделю: {len(accepted['watering'])}."
-            )
+        targets = list(self.chat_ids) if notify_configured_chats else []
         if reply_chat_id is not None:
+            targets.append(reply_chat_id)
+        formatted_plan = self._format_plan(accepted)
+        failed_chats = []
+        for chat_id in dict.fromkeys(targets):
             try:
-                await self._send_long_message(reply_chat_id, self._format_plan(accepted))
+                await self._send_long_message(chat_id, formatted_plan)
             except Exception:
-                logger.exception("Could not send AI schedule to chat %s", reply_chat_id)
-                return "План принят, но не удалось отправить его текст в этот чат."
+                logger.exception("Could not send AI schedule to chat %s", chat_id)
+                failed_chats.append(chat_id)
+        if reply_chat_id is not None and reply_chat_id in failed_chats:
+            return "План принят, но не удалось отправить его текст в этот чат."
+        if failed_chats:
+            return "План принят, но не удалось отправить отчёт в некоторые чаты."
         return f"Недельный план принят: {len(accepted['watering'])} поливов."
 
     async def _send_long_message(self, chat_id: int, text: str) -> None:

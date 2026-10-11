@@ -54,7 +54,7 @@ sudo systemctl restart telegram-camera-bot
 Then open the bot in Telegram. The bot registers `/start`, `/help`,
 `/take_photo`, `/water_lemon`, `/water_pepper`, `/weekly_report`, and
 `/schedule` in Telegram's Menu button on every startup. `/schedule` immediately
-sends the latest 16 photos (or every available photo when fewer exist) and the
+sends up to seven noon photos from the past seven days (one per day) and the
 current sensor values to AI, installs the validated watering plan, and replies
 to the requesting chat with the full schedule and human recommendations. It
 always calls the API, even when the offline `AI_RESPONSE_FILE` test setting is
@@ -64,12 +64,12 @@ configured.
 
 The service uses `Europe/Moscow` by default and runs these jobs:
 
-- takes three daily photos at `10:30`, `12:30`, and `15:00`;
+- takes photos every hour from `08:00` through `20:00` inclusive (13 per day);
 - saves every scheduled and manual photo directly in `data/photos/`;
 - adds date, time, air temperature, lemon soil moisture, and pepper soil
   moisture as a watermark;
-- every Monday at 10:00 selects the latest 16 JPEG files, or all available files
-  when fewer than 16 exist;
+- every Monday at 10:00 selects one photo taken at `12:00` per day from the
+  preceding seven days, up to seven photos;
 - passes the weekly JSON report and all JPEG paths to `request_weekly_plan()` in
   `ai_client.py`;
 - validates and persists the returned watering plan;
@@ -78,17 +78,24 @@ The service uses `Europe/Moscow` by default and runs these jobs:
   `/water_lemon` and `/water_pepper` commands;
 - sends scheduled-watering MP4 videos to `REPORT_CHAT_IDS` (falling back to
   `ALLOWED_USER_IDS`);
-- sends human recommendations and automation errors to `REPORT_CHAT_IDS`.
+- sends the full watering schedule followed by human recommendations to
+  `REPORT_CHAT_IDS`, along with automation errors when they occur.
+
+Automatic weekly reports, `/weekly_report`, and `/schedule` use the same readable
+Telegram format: a week-start heading, one line per watering event with its date,
+time, plant, duration and status, then a `Рекомендации:` section. JSON remains the
+internal format used to validate, save and schedule watering. Long reports are
+split across messages without truncation. `/weekly_report` also sends the report
+to the requesting chat; duplicate chat IDs receive it only once.
 
 The times can be changed in `.env`:
 
 ```bash
 BOT_TIMEZONE=Europe/Moscow
-DAILY_PHOTO_TIMES=10:30,12:30,15:00
+DAILY_PHOTO_TIMES=08:00,09:00,10:00,11:00,12:00,13:00,14:00,15:00,16:00,17:00,18:00,19:00,20:00
 REPORT_CHAT_IDS=123456789
 MAX_WATERING_SECONDS=30
 MAX_WATERING_EVENTS=21
-AI_PHOTO_LIMIT=16
 TELEGRAM_STREAM_STEP_CHARS=400
 TELEGRAM_STREAM_INTERVAL_SECONDS=0.3
 ```
@@ -104,13 +111,25 @@ On the first start after upgrading, JPEG files from the old
 directory and receive date-prefixed filenames.
 
 Use `/weekly_report` to run the weekly cycle manually. It requires at least one
-archived photo.
+noon photo from the preceding seven days. `/schedule` uses the same selection.
+Capture times come from archive filenames in `BOT_TIMEZONE`, not file modification
+times. Only photos from the `12:00` minute qualify; if there are duplicates, the
+earliest one is used. Missing days are not filled with older or non-noon photos.
+The selection window is `(report time - 7 days, report time]`, so a Monday 10:00
+report uses noon photos from the previous Monday through Sunday. Manual reports
+after noon can include today's photo.
+
+When upgrading an existing Raspberry Pi installation, update `DAILY_PHOTO_TIMES`
+in the project's `.env` to the hourly list above and run
+`./scripts/update_service.sh` with the updated project code. The old restriction
+requiring exactly three times has been removed. An old `AI_PHOTO_LIMIT` setting
+is no longer used and can be deleted.
 
 ### AI integration and JSON
 
 `ai_client.py` uses the OpenAI Python SDK with Yandex AI Studio's compatible
 Responses endpoint. One request contains the weekly report, response JSON
-Schema, and up to 16 latest JPEG files as base64 image inputs.
+Schema, and up to seven noon JPEG files as base64 image inputs.
 The reusable prompt, project, endpoint, timeout, and image detail are configured
 in `.env`:
 
@@ -133,8 +152,7 @@ The model response is parsed as JSON and then checked against the bot's pump,
 time-window, duration, event-count, and plant-to-pump safety rules before any
 watering jobs are created.
 
-All selected photos are still sent, up to `AI_PHOTO_LIMIT=16`. The code applies
-a hard maximum of 16 even if an older `.env` contains a larger value. Before upload,
+All selected noon photos are sent, up to seven from the preceding seven days. Before upload,
 temporary API copies are resized to fit within 1280×720 and saved as quality-75
 JPEGs. The dated originals and their watermarks are not modified. Native
 Responses API JSON Schema output is used instead of repeating the full schema

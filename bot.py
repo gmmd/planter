@@ -216,7 +216,9 @@ async def help_command(message: Message) -> None:
         "/schedule — принудительно запросить у нейросети расписание и получить "
         "его в этом чате.\n"
         "/help — показать эту справку.\n\n"
-        "Автоматически бот делает три фотографии ежедневно, каждый понедельник "
+        "По умолчанию бот делает фотографии каждый час с 08:00 до 20:00 включительно "
+        "(расписание задаётся в DAILY_PHOTO_TIMES). Для отчёта берёт до 7 снимков "
+        "за последние 7 дней: по одному в 12:00 за день. Каждый понедельник "
         "в 10:00 запрашивает недельный план и выполняет разрешённые поливы. "
         "Каждый плановый полив записывается на видео и отправляется в Telegram."
     )
@@ -314,7 +316,7 @@ async def weekly_report(message: Message) -> None:
         await message.answer("Automation scheduler is not ready.")
         return
     status = await message.answer("Preparing the weekly photos and AI request…")
-    result = await automation_controller.run_weekly_cycle()
+    result = await automation_controller.run_weekly_cycle(reply_chat_id=message.chat.id)
     await status.edit_text(result)
 
 
