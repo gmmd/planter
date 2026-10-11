@@ -54,7 +54,7 @@ sudo systemctl restart telegram-camera-bot
 Then open the bot in Telegram. The bot registers `/start`, `/help`,
 `/take_photo`, `/water_lemon`, `/water_pepper`, `/weekly_report`, and
 `/schedule` in Telegram's Menu button on every startup. `/schedule` immediately
-sends up to seven noon photos from the past seven days (one per day) and the
+sends up to seven photos at `PICK_DAILY_PHOTO_TIME` from the past seven days (one per day) and the
 current sensor values to AI, installs the validated watering plan, and replies
 to the requesting chat with the full schedule and human recommendations. It
 always calls the API, even when the offline `AI_RESPONSE_FILE` test setting is
@@ -68,7 +68,8 @@ The service uses `Europe/Moscow` by default and runs these jobs:
 - saves every scheduled and manual photo directly in `data/photos/`;
 - adds date, time, air temperature, lemon soil moisture, and pepper soil
   moisture as a watermark;
-- every Monday at 10:00 selects one photo taken at `12:00` per day from the
+- every Monday at 10:00 selects one photo taken at `PICK_DAILY_PHOTO_TIME`
+  (default `15:00`) per day from the
   preceding seven days, up to seven photos;
 - passes the weekly JSON report and all JPEG paths to `request_weekly_plan()` in
   `ai_client.py`;
@@ -93,6 +94,7 @@ The times can be changed in `.env`:
 ```bash
 BOT_TIMEZONE=Europe/Moscow
 DAILY_PHOTO_TIMES=08:00,09:00,10:00,11:00,12:00,13:00,14:00,15:00,16:00,17:00,18:00,19:00,20:00
+PICK_DAILY_PHOTO_TIME=15:00
 REPORT_CHAT_IDS=123456789
 MAX_WATERING_SECONDS=30
 MAX_WATERING_EVENTS=21
@@ -111,13 +113,16 @@ On the first start after upgrading, JPEG files from the old
 directory and receive date-prefixed filenames.
 
 Use `/weekly_report` to run the weekly cycle manually. It requires at least one
-noon photo from the preceding seven days. `/schedule` uses the same selection.
+photo at `PICK_DAILY_PHOTO_TIME` from the preceding seven days. `/schedule` uses the same selection.
 Capture times come from archive filenames in `BOT_TIMEZONE`, not file modification
-times. Only photos from the `12:00` minute qualify; if there are duplicates, the
-earliest one is used. Missing days are not filled with older or non-noon photos.
+times. Only photos from the configured minute qualify; if there are duplicates, the
+earliest one is used. Missing days are not filled with older photos or photos at other times.
 The selection window is `(report time - 7 days, report time]`, so a Monday 10:00
-report uses noon photos from the previous Monday through Sunday. Manual reports
-after noon can include today's photo.
+report uses 15:00 photos from the previous Monday through Sunday with the default
+configuration. Manual reports after the configured time can include today's photo.
+Set `PICK_DAILY_PHOTO_TIME` in `.env` using `HH:MM` and include that time in
+`DAILY_PHOTO_TIMES` so the required photos are captured. Restart the service after
+changing either setting.
 
 When upgrading an existing Raspberry Pi installation, update `DAILY_PHOTO_TIMES`
 in the project's `.env` to the hourly list above and run
@@ -129,7 +134,7 @@ is no longer used and can be deleted.
 
 `ai_client.py` uses the OpenAI Python SDK with Yandex AI Studio's compatible
 Responses endpoint. One request contains the weekly report, response JSON
-Schema, and up to seven noon JPEG files as base64 image inputs.
+Schema, and up to seven JPEG files taken at the configured time as base64 image inputs.
 The reusable prompt, project, endpoint, timeout, and image detail are configured
 in `.env`:
 
@@ -152,7 +157,7 @@ The model response is parsed as JSON and then checked against the bot's pump,
 time-window, duration, event-count, and plant-to-pump safety rules before any
 watering jobs are created.
 
-All selected noon photos are sent, up to seven from the preceding seven days. Before upload,
+All selected photos are sent, up to seven from the preceding seven days. Before upload,
 temporary API copies are resized to fit within 1280×720 and saved as quality-75
 JPEGs. The dated originals and their watermarks are not modified. Native
 Responses API JSON Schema output is used instead of repeating the full schema

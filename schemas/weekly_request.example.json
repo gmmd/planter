@@ -3,7 +3,7 @@
   "report_generated_at": "2026-08-24T10:00:00+03:00",
   "timezone": "Europe/Moscow",
   "photo_selection": {
-    "strategy": "daily_noon_last_7_days",
+    "strategy": "daily_at_time_last_7_days",
     "limit": 7,
     "capture_time": "15:00",
     "window_start": "2026-08-17T10:00:00+03:00",
@@ -31,11 +31,11 @@
     "photo_count": 2,
     "photos": [
       {
-        "filename": "20260817_120000_000000.jpg",
+        "filename": "20260817_150000_000000.jpg",
         "captured_at": "2026-08-17T15:00:00+03:00"
       },
       {
-        "filename": "20260818_120000_000000.jpg",
+        "filename": "20260818_150000_000000.jpg",
         "captured_at": "2026-08-18T15:00:00+03:00"
       }
     ]

@@ -30,7 +30,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", str(PROJECT_DIR / "data")))
 PHOTOS_DIR = DATA_DIR / "photos"
 REPORTS_DIR = DATA_DIR / "reports"
 PLAN_FILE = DATA_DIR / "watering_plan.json"
-PICK_DAILY_PHOTO_TIME = os.getenv("PICK_DAILY_PHOTO_TIME", "15:00")
+PICK_DAILY_PHOTO_TIME = os.getenv("PICK_DAILY_PHOTO_TIME", "15:00").strip()
 BOT_TIMEZONE = os.getenv("BOT_TIMEZONE", "Europe/Moscow")
 TZ = ZoneInfo(BOT_TIMEZONE)
 MAX_WATERING_SECONDS = float(os.getenv("MAX_WATERING_SECONDS", "30"))
@@ -101,7 +101,16 @@ def _photo_captured_at(path: Path) -> Optional[datetime]:
 
 
 def _weekly_photo_paths(now: Optional[datetime] = None) -> List[Path]:
-    """Select one {PICK_DAILY_PHOTO_TIME} photo per day within the preceding seven days."""
+    """Select one photo at the configured time per day over the preceding seven days."""
+    try:
+        if not re.fullmatch(r"[0-9]{2}:[0-9]{2}", PICK_DAILY_PHOTO_TIME):
+            raise ValueError("Expected HH:MM")
+        hour, minute = map(int, PICK_DAILY_PHOTO_TIME.split(":"))
+        pick_time = time(hour=hour, minute=minute)
+    except ValueError as exc:
+        raise RuntimeError(
+            "PICK_DAILY_PHOTO_TIME must be a valid time in HH:MM format"
+        ) from exc
     current = (now or datetime.now(TZ)).astimezone(TZ)
     window_start = current - timedelta(days=WEEKLY_PHOTO_DAYS)
     by_day: Dict[date, tuple[datetime, Path]] = {}
@@ -109,7 +118,7 @@ def _weekly_photo_paths(now: Optional[datetime] = None) -> List[Path]:
         captured_at = _photo_captured_at(path)
         if captured_at is None or not window_start < captured_at <= current:
             continue
-        if (captured_at.hour, captured_at.minute) != (PICK_DAILY_PHOTO_TIME[0], PICK_DAILY_PHOTO_TIME[1]):
+        if (captured_at.hour, captured_at.minute) != (pick_time.hour, pick_time.minute):
             continue
         previous = by_day.get(captured_at.date())
         if previous is None or captured_at < previous[0]:
@@ -260,7 +269,7 @@ class PlantAutomation:
             "report_generated_at": now.isoformat(),
             "timezone": BOT_TIMEZONE,
             "photo_selection": {
-                "strategy": "daily_noon_last_7_days",
+                "strategy": "daily_at_time_last_7_days",
                 "limit": WEEKLY_PHOTO_DAYS,
                 "capture_time": PICK_DAILY_PHOTO_TIME,
                 "window_start": (now - timedelta(days=WEEKLY_PHOTO_DAYS)).isoformat(),

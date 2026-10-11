@@ -20,7 +20,7 @@ from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FfmpegOutput
 
-from automation import PlantAutomation, TZ, new_photo_path
+from automation import PICK_DAILY_PHOTO_TIME, PlantAutomation, TZ, new_photo_path
 from photo_watermark import add_photo_watermark
 from sensors import read_sensor_snapshot
 
@@ -43,7 +43,6 @@ PEPPER_WATERING_SECONDS = float(os.getenv("PEPPER_WATERING_SECONDS", "10"))
 LEMON_TOGGLE_PULSE_SECONDS = float(
     os.getenv("LEMON_TOGGLE_PULSE_SECONDS", "0.2")
 )
-PICK_DAILY_PHOTO_TIME = os.getenv("PICK_DAILY_PHOTO_TIME", "15:00")
 VIDEO_WIDTH = int(os.getenv("VIDEO_WIDTH", "640"))
 VIDEO_HEIGHT = int(os.getenv("VIDEO_HEIGHT", "480"))
 VIDEO_FRAMERATE = float(os.getenv("VIDEO_FRAMERATE", "24"))
